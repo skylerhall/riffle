@@ -128,6 +128,19 @@ h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:600;
 #load-label{font-size:14px}
 #src-real:disabled{opacity:.45;cursor:not-allowed}
 
+/* work qubits */
+.btn.toggle{font-size:13px;padding:6px 10px}
+.btn.toggle[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.btn.toggle:disabled{opacity:.4;cursor:not-allowed}
+.work-note{flex-basis:100%;margin:0;font-size:13px;padding:8px 12px;border-radius:8px;color:var(--fg)}
+.work-note.ok{background:var(--track)}
+.work-note.bad{background:var(--err-bg)}
+.d-wire.work{stroke-dasharray:4 4}
+.d-auto .d-box,.d-auto .d-plus{stroke-dasharray:3 2.5}
+.d-auto .d-dot{fill:var(--panel);stroke:var(--fg);stroke-width:1.5}
+.d-auto .d-link{stroke-dasharray:3 2.5}
+.g-src.work rect{stroke-dasharray:4 3}
+
 /* wire editor */
 main.wide{grid-template-columns:minmax(0,1fr)}
 .palette{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
@@ -200,6 +213,10 @@ pre{margin:0;overflow-x:auto;background:var(--bg);border:1px solid var(--line);b
           <label class="field" for="qubits">Qubits
             <select id="qubits"><option>1</option><option>2</option><option>3</option><option>4</option></select>
           </label>
+          <label class="field" for="work" title="Work qubits are scratch space that starts at |0⟩">Work
+            <select id="work"><option>0</option><option>1</option><option>2</option></select>
+          </label>
+          <button type="button" class="btn toggle" id="cleanup" aria-pressed="true" title="Automatically undo scratch work so work qubits return to |0⟩" disabled>Auto cleanup</button>
         </div>
       </div>
       <div class="status" id="status" role="status"><span class="pill">Live</span><span id="status-msg"></span></div>
@@ -225,6 +242,7 @@ pre{margin:0;overflow-x:auto;background:var(--bg);border:1px solid var(--line);b
       <div class="legend">
         <div><span class="wheel" id="wheel" aria-hidden="true"></span><span>Color = phase. Blue is +, orange is −. Phase can't be measured directly, but it decides which outcomes cancel.</span></div>
         <div><span>Pan = phase too: + sits right, − sits left.</span></div>
+        <p class="work-note" id="work-note" hidden></p>
         <div id="real-key" hidden><span class="swatch" aria-hidden="true"></span><span>Right-hand bar = what the machine actually measured.</span></div>
       </div>
       <div class="real">
@@ -300,9 +318,10 @@ function matrixFor(g, thetaPi){
 }
 
 /* ---------------- refs ---------------- */
-const QRE=/^q(\d+)$/, NAMERE=/^[A-Za-z_]\w*$/;
+const QRE=/^q(\d+)$/, WRE=/^w(\d+)$/, NAMERE=/^[A-Za-z_]\w*$/;
 function parseRef(ref){
-  const m=QRE.exec(ref); if(m) return {src:ref,i:0,qubit:+m[1]};
+  const m=QRE.exec(ref); if(m) return {src:ref,i:0,qubit:+m[1],source:true};
+  const w=WRE.exec(ref); if(w) return {src:ref,i:0,work:+w[1],source:true};
   const dot=ref.indexOf('.'); if(dot<0) return {src:ref,i:0};
   return {src:ref.slice(0,dot), i:+ref.slice(dot+1)};
 }
@@ -310,8 +329,59 @@ const norm = r => { const p=parseRef(r); return p.src+'.'+p.i; };
 
 /* ---------------- compile (same rules as cascade.py) ---------------- */
 function fail(kind,msg,nodes){ return {ok:false,kind,msg,nodes}; }
+// Work qubits (w0, w1…) are scratch space that starts at |0>. A work qubit may only be written by
+// X, CX or CCX and then only read (as a control, or by Z, S, T, RZ, CZ); the compiler then adds the
+// undo of its writes right after its last read, spliced in before anything changes the controls.
+const WRITES={X:[0],CX:[1],CCX:[2]}, READS={CX:[0],CCX:[0,1],CZ:[0,1],Z:[0],S:[0],T:[0],RZ:[0]};
+const writesAt=(g,j)=>(WRITES[g]||[]).includes(j), readsAt=(g,j)=>(READS[g]||[]).includes(j);
+function withCleanup(st){
+  const nodes=st.nodes.map(x=>({...x,inputs:[...x.inputs]}));
+  const by=()=>new Map(nodes.map(x=>[x.name,x]));
+  const consumers=()=>{ const m=new Map(); for(const x of nodes) x.inputs.forEach((r,j)=>{ if(r) m.set(norm(r),[x.name,j]); }); return m; };
+  const refOf=(name,i)=>{ const x=by().get(name); return !x||GATE_INFO[x.gate].k===1?name:`${name}.${i}`; };
+  for(let k=0;k<(st.work||0);k++){
+    const cons=consumers(), line=[]; let wire=`w${k}.0`;
+    while(cons.has(wire)){ const [nm,j]=cons.get(wire); line.push([nm,j]); wire=`${nm}.${j}`; }
+    const ws=[]; let lastRead=null;
+    for(const [nm,j] of line){
+      const g=by().get(nm).gate;
+      if(writesAt(g,j)){
+        if(lastRead) throw {msg:`w${k} is written by ${nm} after ${lastRead} has read it. Automatic cleanup needs every write to a work qubit before its first read.`,nodes:[nm]};
+        ws.push([nm,j]);
+      } else if(readsAt(g,j)) lastRead=nm;
+      else throw {msg:`${nm} (${g}) changes work qubit w${k} in a way that can't be undone automatically. Work qubits can only be written by X, CX or CCX, then read as a control or by a phase gate.`,nodes:[nm]};
+    }
+    if(!ws.length) continue;
+    let end=line[line.length-1];
+    for(const [nm,j] of [...ws].reverse()){
+      const g=by().get(nm), k2=GATE_INFO[g.gate].k, undo=`${nm}~undo`, inputs=[], splice=[];
+      for(let s2=0;s2<k2;s2++){
+        if(s2===j){ inputs.push(refOf(end[0],end[1])); continue; }
+        const c2=consumers(); let w=[nm,s2];
+        while(c2.has(`${w[0]}.${w[1]}`)){
+          const [m,t]=c2.get(`${w[0]}.${w[1]}`);
+          if(readsAt(by().get(m).gate,t)) w=[m,t]; else { splice.push([m,t,s2]); break; }
+        }
+        inputs.push(refOf(w[0],w[1]));
+      }
+      nodes.push({name:undo,gate:g.gate,inputs,theta:g.theta,auto:true});
+      for(const [m,t,s2] of splice) by().get(m).inputs[t]=k2>1?`${undo}.${s2}`:undo;
+      end=[undo,j];
+    }
+  }
+  return nodes;
+}
 function compile(st){
-  const {n,nodes}=st, by=new Map(nodes.map(x=>[x.name,x]));
+  const r=compileNodes(st,st.nodes);
+  if(!r.ok||!(st.work>0)||st.cleanup===false) return r;
+  let exp; try{ exp=withCleanup(st); }catch(err){ return fail('err',err.msg||String(err),err.nodes||[]); }
+  const r2=compileNodes(st,exp);
+  if(!r2.ok) return fail('err',"A work qubit can't be cleaned up automatically: one of the qubits used to compute it changes before the work qubit's last read. Read the work qubit first, or change that qubit later.",[]);
+  r2.auto=exp.filter(x=>x.auto).length;
+  return r2;
+}
+function compileNodes(st,nodes){
+  const n=st.n, work=st.work||0, by=new Map(nodes.map(x=>[x.name,x]));
   const missing=[], consumers=new Map(), deps=new Map();
   for(const node of nodes){
     const d=new Set(); deps.set(node.name,d);
@@ -320,6 +390,8 @@ function compile(st){
       const p=parseRef(ref);
       if(p.qubit!==undefined){
         if(p.qubit>=n) return fail('err',`${node.name} reads ${ref}, but this patch has ${n} qubit${n>1?'s':''}. Add a qubit or pick another wire.`,[node.name]);
+      } else if(p.work!==undefined){
+        if(p.work>=work) return fail('err',`${node.name} reads ${ref}, but this patch has ${work} work qubit${work===1?'':'s'}. Add one under Work, or pick another wire.`,[node.name]);
       } else {
         const src=by.get(p.src);
         if(!src){ if(!missing.includes(p.src)) missing.push(p.src); continue; }
@@ -346,25 +418,25 @@ function compile(st){
     const stuck=nodes.filter(x=>!order.includes(x.name)).map(x=>x.name);
     return fail('err',`Loop between ${stuck.join(', ')}. A gate can't feed something that feeds it.`,stuck);
   }
-  const qof=new Map(); for(let q=0;q<n;q++) qof.set(`q${q}.0`,q);
+  const qof=new Map(); for(let q=0;q<n;q++) qof.set(`q${q}.0`,q); for(let k=0;k<work;k++) qof.set(`w${k}.0`,n+k);
   const steps=[];
   for(const name of order){
     const node=by.get(name), qs=node.inputs.map(r=>qof.get(norm(r)));
     if(new Set(qs).size!==qs.length) return fail('err',`${name} touches the same qubit twice. Its inputs must come from different qubit lines.`,[name]);
     qs.forEach((q,i)=>qof.set(`${name}.${i}`,q));
-    steps.push({name,gate:node.gate,qs,theta:node.theta});
+    steps.push({name,gate:node.gate,qs,theta:node.theta,auto:!!node.auto});
   }
   return {ok:true,steps};
 }
 
 /* ---------------- simulate ---------------- */
-function simulate(n,steps){
-  const N=1<<n, re=new Float64Array(N), im=new Float64Array(N); re[0]=1;
+function simulate(n,work,steps){
+  const T=n+(work||0), NT=1<<T, re=new Float64Array(NT), im=new Float64Array(NT); re[0]=1;
   for(const st of steps){
     const U=matrixFor(st.gate,st.theta), k=st.qs.length, K=1<<k;
-    const masks=st.qs.map(q=>1<<(n-1-q)), all=masks.reduce((a,b)=>a|b,0);
+    const masks=st.qs.map(q=>1<<(T-1-q)), all=masks.reduce((a,b)=>a|b,0);
     const idx=new Array(K), ar=new Float64Array(K), ai=new Float64Array(K);
-    for(let base=0;base<N;base++){
+    for(let base=0;base<NT;base++){
       if(base&all) continue;
       for(let l=0;l<K;l++){ let x=base; for(let j=0;j<k;j++) if((l>>(k-1-j))&1) x|=masks[j]; idx[l]=x; ar[l]=re[x]; ai[l]=im[x]; }
       for(let r=0;r<K;r++){
@@ -374,17 +446,20 @@ function simulate(n,steps){
       }
     }
   }
+  // work qubits are the low bits: report the main qubits, summed over them
+  const W=1<<(work||0), N=1<<n;
   // global phase is physically meaningless: rotate so the first outcome present is real and positive
-  let ref=-1; for(let i=0;i<N;i++) if(re[i]*re[i]+im[i]*im[i]>1e-6){ ref=i; break; }
-  const probs=[], phases=[];
+  let ref=-1; for(let i=0;i<N;i++){ const z=i*W; if(re[z]*re[z]+im[z]*im[z]>1e-6){ ref=z; break; } }
+  const probs=[], phases=[]; let clean=0;
   const g = ref<0 ? 0 : Math.atan2(im[ref],re[ref]);
   for(let i=0;i<N;i++){
-    const p=re[i]*re[i]+im[i]*im[i];
+    let p=0; for(let w=0;w<W;w++){ const x=i*W+w; p+=re[x]*re[x]+im[x]*im[x]; }
+    const z=i*W; clean+=re[z]*re[z]+im[z]*im[z];
     probs.push(p<1e-12?0:p);
-    let ph=Math.atan2(im[i],re[i])-g; ph=((ph%(2*PI))+2*PI)%(2*PI);
+    let ph=Math.atan2(im[z],re[z])-g; ph=((ph%(2*PI))+2*PI)%(2*PI);
     phases.push(ph);
   }
-  return {probs,phases};
+  return {probs,phases,clean};
 }
 
 /* ---------------- state ---------------- */
@@ -398,14 +473,18 @@ const PRESETS = {
     N_('h0','H',['oracle.0']),N_('h1','H',['oracle.1']),N_('x0','X',['h0']),N_('x1','X',['h1']),
     N_('mirror','CZ',['x0','x1']),N_('u0','X',['mirror.0']),N_('u1','X',['mirror.1']),N_('out0','H',['u0']),N_('out1','H',['u1'])]},
   ghz:{label:'GHZ chord', n:3, nodes:()=>[N_('s','H',['q0']),N_('link1','CX',['s','q1']),N_('link2','CX',['link1.0','q2'])]},
+  grover_work:{label:'Grover via work qubit', n:2, work:1, nodes:()=>[
+    N_('s0','H',['q0']),N_('s1','H',['q1']),N_('both','CCX',['s0','s1','w0']),N_('mark','Z',['both.2']),
+    N_('h0','H',['both.0']),N_('h1','H',['both.1']),N_('x0','X',['h0']),N_('x1','X',['h1']),
+    N_('mirror','CZ',['x0','x1']),N_('u0','X',['mirror.0']),N_('u1','X',['mirror.1']),N_('out0','H',['u0']),N_('out1','H',['u1'])]},
   rainbow:{label:'Phase rainbow', n:3, nodes:()=>[
     N_('h0','H',['q0']),N_('h1','H',['q1']),N_('h2','H',['q2']),N_('p0','S',['h0']),N_('p1','T',['h1']),N_('p2','RZ',['h2'],0.25)]},
 };
-let state={n:1,nodes:[]};
+let state={n:1,work:0,cleanup:true,nodes:[]};
 let lastGood=null, current=null;
 
 function loadPreset(key){
-  const p=PRESETS[key]; state={n:p.n,nodes:p.nodes()}; selectedId=null; const tst=document.getElementById('toast'); if(tst) tst.hidden=true;
+  const p=PRESETS[key]; state={n:p.n,work:p.work||0,cleanup:true,nodes:p.nodes()}; selectedId=null; syncWork(); const tst=document.getElementById('toast'); if(tst) tst.hidden=true;
   $('#qubits').value=String(p.n); $('#preset').value=key; shots=[];
   update(true);
 }
@@ -418,7 +497,7 @@ function consumerMap(){
 }
 function outputsOf(node){ const k=GATE_INFO[node.gate].k; return k===1?[node.name]:Array.from({length:k},(_,i)=>`${node.name}.${i}`); }
 function candidates(selfName){
-  const c=[]; for(let q=0;q<state.n;q++) c.push(`q${q}`);
+  const c=[]; for(let q=0;q<state.n;q++) c.push(`q${q}`); for(let k=0;k<(state.work||0);k++) c.push(`w${k}`);
   for(const x of state.nodes) if(x.name!==selfName) c.push(...outputsOf(x));
   return c;
 }
@@ -538,7 +617,7 @@ function rename(node,nm,input){
   if(nm===node.name) return;
   let problem='';
   if(!NAMERE.test(nm)) problem='Names use letters, digits and _ and start with a letter.';
-  else if(QRE.test(nm)) problem='q0, q1… are reserved for the starting qubits.';
+  else if(QRE.test(nm)||WRE.test(nm)) problem='q0, q1… and w0, w1… are reserved for the starting qubits.';
   else if(state.nodes.some(x=>x!==node && x.name===nm)) problem=`${nm} is already taken.`;
   if(problem){ input.value=node.name; showStatus({ok:false,kind:'err',msg:problem}); setTimeout(()=>showStatus(current),2600); return; }
   const old=node.name; node.name=nm;
@@ -563,13 +642,15 @@ function showStatus(res){
   const box=$('#status'), msg=$('#status-msg'), pill=box.querySelector('.pill');
   box.className='status '+(res.ok?'ok':res.kind);
   pill.textContent=res.ok?'Live':res.kind==='wait'?'Waiting':res.kind==='clone'?'No-cloning':'Fix';
-  msg.textContent=res.ok?`${state.nodes.length} gate${state.nodes.length===1?'':'s'} on ${state.n} qubit${state.n>1?'s':''}. Change anything and it cascades through.`:res.msg;
+  const w=state.work||0, wq=w?` + ${w} work qubit${w>1?'s':''}`:'';
+  const auto=res.ok&&res.auto?` Cascade added ${res.auto} cleanup gate${res.auto>1?'s':''} (dashed in the circuit).`:(res.ok&&w&&state.cleanup===false?' Automatic cleanup is off.':'');
+  msg.textContent=res.ok?`${state.nodes.length} gate${state.nodes.length===1?'':'s'} on ${state.n} qubit${state.n>1?'s':''}${wq}.${auto||' Change anything and it cascades through.'}`:res.msg;
 }
 
 /* ---------------- diagram ---------------- */
 const SYM={CX:['ctrl','plus'],CZ:['ctrl','ctrl'],CCX:['ctrl','ctrl','plus'],SWAP:['x','x']};
 function renderDiagram(steps){
-  const n=state.n, colW=46, x0=58, top=24, rowH=44;
+  const n=state.n+(state.work||0), colW=46, x0=58, top=24, rowH=44;
   const last=Array(n).fill(-1), placed=[];
   for(const s of steps){
     const lo=Math.min(...s.qs), hi=Math.max(...s.qs);
@@ -581,12 +662,13 @@ function renderDiagram(steps){
   const W=Math.max(x0+cols*colW+30,260), H=top*2+(n-1)*rowH;
   const y=q=>top+q*rowH, x=c=>x0+c*colW+colW/2;
   let svg=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Circuit diagram">`;
-  for(let q=0;q<n;q++) svg+=`<text class="d-lbl" x="8" y="${y(q)+4}">q${q}</text><line class="d-wire" x1="36" y1="${y(q)}" x2="${W-10}" y2="${y(q)}"/>`;
+  for(let q=0;q<n;q++){ const lbl=q<state.n?`q${q}`:`w${q-state.n}`; svg+=`<text class="d-lbl" x="8" y="${y(q)+4}">${lbl}</text><line class="d-wire${q<state.n?'':' work'}" x1="36" y1="${y(q)}" x2="${W-10}" y2="${y(q)}"/>`; }
   for(const p of placed){
     const cx=x(p.col);
-    const tip=`<title>${p.name} = ${p.gate}${GATE_INFO[p.gate].rot?'('+fmtPi(p.theta)+')':''}</title>`;
+    const tip=`<title>${p.auto?'Added by Cascade: undoes '+p.name.replace('~undo','')+' so the work qubit returns to |0⟩':p.name+' = '+p.gate+(GATE_INFO[p.gate].rot?'('+fmtPi(p.theta)+')':'')}</title>`;
+    const gc=p.auto?' class="d-auto"':'';
     if(SYM[p.gate]){
-      svg+=`<g>${tip}<line class="d-link" x1="${cx}" y1="${y(p.lo)}" x2="${cx}" y2="${y(p.hi)}"/>`;
+      svg+=`<g${gc}>${tip}<line class="d-link" x1="${cx}" y1="${y(p.lo)}" x2="${cx}" y2="${y(p.hi)}"/>`;
       SYM[p.gate].forEach((m,j)=>{ const yy=y(p.qs[j]);
         if(m==='ctrl') svg+=`<circle class="d-dot" cx="${cx}" cy="${yy}" r="4.5"/>`;
         else if(m==='plus') svg+=`<circle class="d-plus" cx="${cx}" cy="${yy}" r="10"/><line class="d-link" x1="${cx-10}" y1="${yy}" x2="${cx+10}" y2="${yy}"/><line class="d-link" x1="${cx}" y1="${yy-10}" x2="${cx}" y2="${yy+10}"/>`;
@@ -595,7 +677,7 @@ function renderDiagram(steps){
       svg+='</g>';
     } else {
       const yy=y(p.qs[0]), w=p.gate.length>1?34:28;
-      svg+=`<g>${tip}<rect class="d-box" x="${cx-w/2}" y="${yy-13}" width="${w}" height="26" rx="5"/><text class="d-txt" x="${cx}" y="${yy+4}" text-anchor="middle">${p.gate}</text></g>`;
+      svg+=`<g${gc}>${tip}<rect class="d-box" x="${cx-w/2}" y="${yy-13}" width="${w}" height="26" rx="5"/><text class="d-txt" x="${cx}" y="${yy+4}" text-anchor="middle">${p.gate}</text></g>`;
     }
   }
   if(!steps.length) svg+=`<text class="d-lbl" x="${x0}" y="${top-8}">no gates yet</text>`;
@@ -650,6 +732,15 @@ function renderSpectrum(){
     c.querySelector('.ph-v').textContent=p>0.0005?`φ ${(ph/PI).toFixed(2)}π`:'—';
     c.querySelector('.shots').textContent=measuring?`${counts[i]} hit${counts[i]===1?'':'s'}`:'';
   }
+  const wn=$('#work-note');
+  if(good&&good.work){
+    const pc=(good.clean*100).toFixed(good.clean>0.9995||good.clean<0.0005?0:1);
+    wn.hidden=false;
+    wn.className='work-note '+(good.clean>0.9995?'ok':'bad');
+    wn.textContent=good.clean>0.9995
+      ? `Work qubit${good.work>1?'s':''} back at |0⟩ (${pc}%). Cascade's cleanup undid the scratch work, so it doesn't spoil the interference.`
+      : `Work qubit${good.work>1?'s':''} left tangled up with the answer: only ${pc}% back at |0⟩. That leftover is what spreads the probability out. Turn Auto cleanup on to fix it.`;
+  } else wn.hidden=true;
   const hearReal=!!real&&src==='real';
   $('#spec-note').textContent=measuring
     ? (hearReal ? (real.r.record ? `Replaying the machine's own measurements in order, one note per shot (shot ${recIdx} of ${real.r.record.length}).` : `Drawing notes from the corrected results, one per beat.`)
@@ -756,21 +847,25 @@ const num=t=>String(+(+t).toFixed(4));
 function exportText(res){
   if(!res.ok) return `// The patch has a problem, so there's nothing to export yet:\n// ${res.msg}`;
   if(tab==='qasm'){
-    const L=['OPENQASM 3.0;','include "stdgates.inc";','',`qubit[${state.n}] q;`,`bit[${state.n}] c;`,''];
+    const T=state.n+(state.work||0);
+    const L=['OPENQASM 3.0;','include "stdgates.inc";','',`qubit[${T}] q;${state.work?`  // q[${state.n}]… are work qubits`:''}`,`bit[${state.n}] c;`,''];
     for(const s of res.steps){
       const par=GATE_INFO[s.gate].rot?`(${num(s.theta)}*pi)`:'';
-      L.push(`${s.gate.toLowerCase()}${par} ${s.qs.map(q=>`q[${q}]`).join(', ')};`.padEnd(26)+`// ${s.name}`);
+      L.push(`${s.gate.toLowerCase()}${par} ${s.qs.map(q=>`q[${q}]`).join(', ')};`.padEnd(26)+`// ${s.auto?'cleanup, added by Cascade':s.name}`);
     }
-    L.push('','c = measure q;'); return L.join('\n');
+    L.push('');
+    if(state.work) for(let i=0;i<state.n;i++) L.push(`c[${i}] = measure q[${i}];`); else L.push('c = measure q;');
+    return L.join('\n');
   }
   if(tab==='patch'){
     const rows=state.nodes.map(x=>'  '+JSON.stringify(GATE_INFO[x.gate].rot?{name:x.name,gate:x.gate,inputs:x.inputs,theta:+(+x.theta).toFixed(4)}:{name:x.name,gate:x.gate,inputs:x.inputs}));
-    return `{"format": "cascade-patch/1", "label": "My patch", "n": ${state.n}, "patch": [\n${rows.join(',\n')}\n]}`;
+    const extra=state.work?`, "work": ${state.work}, "cleanup": ${state.cleanup!==false}`:'';
+    return `{"format": "cascade-patch/1", "label": "My patch", "n": ${state.n}${extra}, "patch": [\n${rows.join(',\n')}\n]}`;
   }
   const used=[...new Set(state.nodes.map(x=>x.gate))].sort();
   const L=[];
   if(state.nodes.some(x=>GATE_INFO[x.gate].rot)) L.push('from math import pi');
-  L.push(`from cascade import Cascade, ${used.join(', ')}`,'',`c = Cascade(${state.n}, shots=1000)`,'with c.batch():  # declared in patch order; cascade sorts it out');
+  L.push(`from cascade import Cascade, ${used.join(', ')}`,'',`c = Cascade(${state.n}${state.work?`, work=${state.work}`:''}${state.work&&state.cleanup===false?', cleanup=False':''}, shots=1000)`,'with c.batch():  # declared in patch order; cascade sorts it out');
   for(const x of state.nodes){
     const args=x.inputs.map(r=>JSON.stringify(r));
     if(GATE_INFO[x.gate].rot) args.unshift(`${num(x.theta)} * pi`);
@@ -796,18 +891,20 @@ const SAMPLE = {"format":"cascade-results/1","backend":"fake_kingston (noise mod
 const REAL_1 = {"format":"cascade-results/1","backend":"ibm_kingston","kind":"hardware","job_id":"dbkveot6p51s73cnfao0","created":"2026-11-03T15:02:04+00:00","runs":[{"preset":"dial","label":"Interference dial","n":1,"shots":2000,"patch":[{"name":"a","gate":"H","inputs":["q0"]},{"name":"dial","gate":"RZ","inputs":["a"],"theta":0.5},{"name":"out","gate":"H","inputs":["dial"]}],"counts":{"0":1016,"1":984},"ideal":{"0":0.5,"1":0.5},"record":["0","1","1","1","1","0","0","0","0","1","1","0","0","1","1","1","0","1","0","1","0","0","1","0","0","1","1","1","1","1","1","1","1","1","1","1","1","0","0","0","0","0","1","1","0","1","1","1","1","0","0","0","0","0","1","1","1","0","1","0","0","1","0","1","1","1","1","0","1","1","0","0","0","0","0","1","0","1","1","1","0","0","0","0","0","1","1","1","0","0","1","0","0","0","0","0","0","0","0","1","0","0","0","0","1","0","1","1","1","0","0","0","1","1","0","0","1","0","0","0","0","0","0","1","0","1","0","0","0","1","0","1","1","1","0","0","1","1","1","0","0","0","0","0","1","0","1","1","1","1","0","1","1","1","1","1","0","1","1","0","1","1","0","0","1","1","1","1","0","0","0","1","0","1","1","1","0","0","0","1","1","0","0","1","1","0","0","1","1","0","1","0","1","1","1","1","1","0","1","0","1","0","0","1","0","0","1","0","0","0","1","0","1","0","1","0","0","0","1","0","0","1","1","1","0","0","1","0","1","1","0","1","0","1","1","1","0","0","1","0","1","1","1","0","1","0","1","0","0","0","1","0","1","1","0","1","0","1","1","0","0","0","1","1","0","1","0","1","1","1","1","1","1","1","0","0","0","0","0","0","0","1","1","1","0","1","0","0","0","0","1","1","1","1","1","0","1","1","0","0","1","1","1","0","0","0","0","0","1","1","1","0","1","1","0","0","0","1","0","1","0","1","1","0","1","0","1","1","0","1","1","1","0","0","0","1","0","0","0","0","0","0","0","1","1","0","0","0","0","1","1","0","1","0","0","1","1","1","1","0","1","0","1","0","0","0","0","0","1","0","0","1","0","0","0","1","1","0","0","1","0","0","1","0","1","1","0","1","1","0","0","0","1","1","1","1","0","1","0","1","1","0","0","0","1","1","1","0","0","1","1","1","0","0","1","0","0","1","1","0","1","1","0","0","1","1","1","1","1","0","1","1","1","0","1","0","1","1","1","1","0","1","1","1","1","0","1","1","0","1","0","1","0","1","0","0","0","1","0","1","0","1","0","1","1","0","1","1","0","1","0","0","1","1","1","1","1","0","0","1","0","0","1","1","1","0","0","0","1","0","1","1","0","1","0","0","1","0","0","1","1","1","0","0","0","0","1","0","0","0","1","0"],"fidelity":0.9999},{"preset":"bell","label":"Bell pair (written backwards)","n":2,"shots":2000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"counts":{"00":984,"01":31,"10":60,"11":925},"ideal":{"00":0.5,"11":0.5},"record":["00","11","00","00","00","00","00","00","11","11","11","11","00","00","00","00","10","11","11","00","00","11","11","00","00","00","00","00","11","11","00","00","00","00","11","00","01","00","11","11","00","00","00","00","00","00","00","11","11","11","00","00","00","11","11","00","10","00","11","00","11","00","11","11","00","11","00","11","11","00","00","11","00","00","10","11","11","11","00","11","01","00","00","00","00","11","11","00","00","00","11","11","00","00","11","00","11","11","00","11","11","00","11","11","11","11","00","00","00","11","11","00","11","00","11","11","11","00","00","00","10","11","00","00","11","11","00","11","00","00","11","11","11","11","11","00","11","11","00","00","00","11","11","11","00","11","00","00","00","11","00","00","00","11","11","00","11","11","11","11","11","11","00","00","11","00","11","00","00","00","00","11","11","00","00","00","00","11","00","00","11","11","11","11","11","11","00","11","11","00","00","11","11","00","10","01","00","11","11","01","00","00","11","11","00","11","00","00","11","11","11","00","11","11","00","11","11","11","11","11","00","11","00","11","11","10","11","11","00","00","10","11","11","11","11","11","10","00","11","10","00","00","00","11","00","00","00","11","11","11","11","11","11","11","00","00","11","00","11","11","00","11","00","00","00","01","11","00","11","00","11","11","11","00","11","11","11","11","00","11","00","01","11","11","11","11","00","11","00","11","00","00","11","11","11","00","11","11","00","00","00","11","11","00","00","11","00","00","11","00","00","00","10","00","11","00","00","11","00","11","00","11","00","00","11","00","00","11","00","00","11","00","00","00","00","11","11","00","11","00","00","11","11","11","10","11","00","00","11","11","00","00","11","00","11","00","00","11","00","00","11","11","00","00","00","11","11","00","00","11","00","11","10","00","00","11","11","00","00","01","00","00","00","00","00","00","00","11","11","00","00","00","00","11","00","11","11","11","11","00","11","11","11","00","00","11","00","00","11","00","00","11","11","00","11","00","00","00","11","00","11","11","00","11","11","10","00","11","11","11","00","10","11","00","00","11","11","01","00","11","00","00","00","00","11","11","00","11","00","11","11","11","11","11","11","00","11","00","00","00","00","11","01","11","11","11","11","11","00","11","11","11","11","11","11","00","00","00","11","00","01","11","11","11","00","11","00","00","00","11","00","11","00","00","00","00","11","00","10","11","00","11","01","11","00","11","00","11","11","00","11","00"],"fidelity":0.9543},{"preset":"grover","label":"Grover search","n":2,"shots":2000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"counts":{"00":10,"01":26,"10":125,"11":1839},"ideal":{"11":1.0},"record":["11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","10","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","10","10","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","10","11","11","11","11","10","11","01","11","11","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","11","11","11","11","11","11","10","11","11","10","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","10","11","11","11","11","10","11","11","11","11","10","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","00","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","01","11","11","11","11","11","11","10","11","11","11","10","11","01","11","11","10","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","01","11","11","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","10","10","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","01","11","11","11","10","11","11","11","11","11","11","11","11","11","11"],"fidelity":0.9195},{"preset":"ghz","label":"GHZ chord","n":3,"shots":2000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"counts":{"000":947,"001":12,"010":34,"011":9,"100":3,"101":20,"110":11,"111":964},"ideal":{"000":0.5,"111":0.5},"record":["000","000","000","000","000","010","000","000","000","000","000","111","000","111","000","111","000","000","111","111","000","000","000","000","111","000","000","000","000","111","000","000","000","111","111","000","000","111","111","000","000","000","000","111","111","010","000","000","111","111","111","000","111","000","111","111","111","111","101","000","111","000","000","000","101","000","000","000","111","111","111","000","000","010","111","000","000","000","000","000","111","111","111","010","111","000","000","000","111","111","111","111","000","000","111","000","000","111","111","111","000","000","111","000","111","111","111","000","111","000","000","000","000","000","111","000","111","111","000","101","000","000","000","111","000","111","000","000","000","000","000","111","111","000","111","111","000","111","111","111","000","111","111","000","111","000","000","000","111","111","000","000","000","110","000","111","111","000","000","111","100","000","111","111","111","000","000","111","000","111","111","111","111","111","000","111","111","111","111","111","111","000","000","111","000","111","000","111","111","101","000","010","000","000","000","000","111","111","111","111","000","000","111","111","000","111","111","000","111","000","000","111","111","101","000","000","000","111","000","111","000","111","111","111","000","000","111","111","000","000","000","111","111","000","000","000","111","111","111","111","000","111","111","000","000","111","111","111","111","000","111","111","111","000","111","111","000","000","111","111","111","111","111","111","111","111","000","000","111","000","111","111","000","111","111","000","000","111","000","111","111","111","000","000","111","111","000","000","111","111","111","111","000","000","111","000","111","111","000","000","000","111","000","000","000","111","000","111","000","111","000","000","000","111","111","111","111","000","111","000","000","000","111","111","111","111","111","111","000","000","111","111","111","111","111","000","111","111","111","111","111","111","000","111","000","010","000","111","000","010","000","000","111","000","000","000","000","111","000","000","000","101","000","111","111","111","111","111","101","000","111","000","111","000","111","111","111","111","111","000","111","111","111","000","111","111","000","000","111","111","111","111","000","111","000","000","000","111","000","000","000","000","000","111","111","111","111","111","111","111","000","000","000","111","111","111","111","111","111","000","000","000","111","000","000","111","111","111","111","000","000","000","000","111","000","111","000","000","111","000","000","111","111","000","000","000","000","000","000","111","011","111","111","000","000","000","000","000","000","000","111","111","000","111","000","000","000","111","000","111","000","000","000","000","111","000","111","111","000","000","111","111","000","111","000","000","111","111","000","000","111","111","111","111","111","000","111","000","000","111","111","000","111","111","000","000","111","000","000","000","111","000"],"fidelity":0.9555},{"preset":"rainbow","label":"Phase rainbow","n":3,"shots":2000,"patch":[{"name":"h0","gate":"H","inputs":["q0"]},{"name":"h1","gate":"H","inputs":["q1"]},{"name":"h2","gate":"H","inputs":["q2"]},{"name":"p0","gate":"S","inputs":["h0"]},{"name":"p1","gate":"T","inputs":["h1"]},{"name":"p2","gate":"RZ","inputs":["h2"],"theta":0.25}],"counts":{"000":270,"001":254,"010":239,"011":254,"100":256,"101":243,"110":242,"111":242},"ideal":{"000":0.125,"001":0.125,"010":0.125,"011":0.125,"100":0.125,"101":0.125,"110":0.125,"111":0.125},"record":["010","001","001","111","100","110","001","011","011","101","011","010","101","101","000","000","000","100","110","010","000","110","000","101","100","101","001","011","111","111","100","111","000","101","011","101","110","011","010","110","011","000","110","000","011","001","010","100","001","011","100","111","010","010","110","000","000","010","111","001","000","001","110","111","111","011","000","011","011","000","110","000","011","011","100","000","101","000","010","010","101","010","110","100","010","101","100","111","000","101","100","111","111","110","011","001","100","100","111","011","111","001","001","000","000","100","101","001","111","000","010","101","000","000","110","100","001","111","110","101","001","010","000","110","111","000","001","110","100","011","111","000","101","011","101","000","100","100","111","001","101","011","011","111","010","111","011","100","110","000","001","110","011","000","100","101","111","001","111","001","000","011","011","111","010","101","011","011","110","101","001","100","011","010","000","011","011","000","010","011","000","111","010","001","101","110","111","000","000","100","000","101","001","010","011","100","001","111","100","110","100","010","010","001","000","111","101","110","011","110","101","110","001","001","110","110","100","010","000","000","010","001","101","000","110","011","111","101","010","110","000","000","010","111","010","100","101","000","001","111","000","010","011","111","101","011","010","011","001","001","111","001","001","011","101","000","001","101","011","110","010","001","110","000","101","111","011","111","111","100","000","100","010","101","001","011","101","001","111","100","000","010","011","010","101","100","011","100","000","000","101","110","110","000","111","101","100","101","000","011","001","001","000","000","010","010","010","111","001","110","111","010","000","100","011","010","010","001","001","100","110","111","010","000","000","101","110","110","011","100","011","110","110","000","111","000","110","010","100","101","000","010","100","110","011","001","001","100","000","111","110","010","011","110","001","111","101","010","110","101","001","100","010","110","111","110","010","101","100","101","111","111","011","001","111","101","111","101","011","101","100","001","101","001","100","011","010","100","111","100","000","000","100","000","100","101","011","000","100","110","110","110","100","101","101","101","100","001","110","111","001","011","111","011","111","100","100","011","010","111","001","100","100","110","000","010","101","111","110","100","110","011","001","101","110","001","100","000","000","101","001","110","001","000","010","110","011","100","000","010","101","011","000","011","001","100","001","101","000","111","001","010","000","000","111","100","100","100","011","000","100","001","110","100","001","001","001","011","111","010","011","101","010","111","111","010","101","100","001","000","001","101","111","110","001","111","101","000","010","101","110","000","101","000","110","111","101","110","100","001","001","110"],"fidelity":0.9996}]};
 // Compiler comparison: IBM ibm_fez, Nov 3 2026
 const REAL_2 = {"format":"cascade-results/1","backend":"ibm_fez","kind":"hardware","job_id":"dbkvhqonceqs73amnmkg,dbkvhqpkdqps73939k40","comparison":true,"created":"2026-11-03T15:08:54+00:00","runs":[{"preset":"bell","n":2,"shots":4000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"ideal":{"00":0.5,"11":0.5},"label":"Bell pair (written backwards) \u00b7 IBM default","variant":"default","counts":{"00":2008.0,"01":34.0,"10":24.0,"11":1934.0},"record":["00","00","11","00","11","00","00","00","11","11","11","00","11","11","00","11","00","11","00","00","11","11","11","00","00","11","00","11","00","00","00","11","00","11","00","00","11","11","00","11","00","11","11","11","00","11","11","00","11","00","00","11","11","11","00","00","00","11","11","11","11","00","11","11","00","00","11","00","11","11","00","11","11","00","11","11","11","11","00","00","00","11","00","11","00","11","00","00","11","11","00","11","11","11","11","00","11","00","00","11","00","11","11","11","11","00","00","11","11","00","00","11","11","11","11","11","11","11","00","11","00","00","11","11","00","11","00","11","00","11","11","11","00","11","00","11","00","11","11","00","00","11","00","00","00","00","11","11","00","00","11","00","11","11","11","00","00","11","00","00","00","11","00","11","11","00","00","11","11","00","11","00","11","00","00","11","11","00","00","11","00","01","00","00","00","11","00","11","00","10","00","11","00","11","00","00","00","00","11","00","01","00","11","11","11","11","11","00","00","11","00","11","11","00","00","00","00","00","10","11","00","11","00","00","00","11","11","00","11","00","11","11","11","11","11","11","11","00","00","00","00","11","00","00","00","11","00","11","11","00","00","11","00","11","00","00","00","11","11","00","00","00","11","11","00","00","11","10","11","00","00","11","11","11","11","11","11","00","11","11","00","00","00","00","00","00","00","00","11","00","00","11","00","00","11","00","11","00","00","11","11","11","11","11","11","00","11","11","11","11","00","00","11","11","00","00","00","00","11","00","11","00","00","00","00","10","11","11","11","00","00","11","00","11","00","11","11","00","00","00","11","00","00","00","00","11","11","11","00","00","00","00","00","00","11","01","11","11","00","00","00","11","11","00","11","11","11","11","00","11","00","00","00","11","00","11","11","00","00","11","11","00","00","11","11","11","11","11","00","00","00","00","00","11","00","00","11","11","11","11","00","00","00","10","00","00","00","11","11","00","00","11","11","11","11","11","00","00","00","00","11","00","00","11","11","00","00","00","11","11","11","00","11","00","00","00","00","00","00","00","00","11","00","11","11","00","00","00","00","11","00","11","00","00","00","00","00","11","11","00","11","11","00","00","11","11","11","00","00","00","11","00","11","11","11","00","00","00","11","00","00","11","11","11","00","11","00","11","00","00","00","00","00","11","00","00","00","11","11","11","00","00","00","00","11","11","11","00","11","00","11","00"],"fidelity":0.9854,"predicted":0.9901},{"preset":"bell","n":2,"shots":4000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"ideal":{"00":0.5,"11":0.5},"label":"Bell pair (written backwards) \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"00":2048.652,"01":5.083,"11":1946.265},"raw_counts":{"00":2030,"01":35,"10":23,"11":1912},"record":null,"fidelity":0.9986,"fidelity_before_readout_fix":0.9853,"predicted":0.9901,"physical_qubits":[84,85],"readout_flip_rates":{"read_1_when_0":[0.0045,0.0047],"read_0_when_1":[0.0105,0.0073]},"baseline_fidelity":0.9854},{"preset":"grover","n":2,"shots":4000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"ideal":{"11":1.0},"label":"Grover search \u00b7 IBM default","variant":"default","counts":{"00":28.0,"01":53.0,"10":45.0,"11":3874.0},"record":["11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","10","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10"],"fidelity":0.9685,"predicted":0.987},{"preset":"grover","n":2,"shots":4000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"ideal":{"11":1.0},"label":"Grover search \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"00":14.595,"01":2.616,"10":11.734,"11":3971.055},"raw_counts":{"00":15,"01":38,"10":51,"11":3896},"record":null,"fidelity":0.9928,"fidelity_before_readout_fix":0.974,"predicted":0.987,"physical_qubits":[85,84],"readout_flip_rates":{"read_1_when_0":[0.0032,0.0025],"read_0_when_1":[0.009,0.01]},"baseline_fidelity":0.9685},{"preset":"ghz","n":3,"shots":4000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"ideal":{"000":0.5,"111":0.5},"label":"GHZ chord \u00b7 IBM default","variant":"default","counts":{"000":2017.0,"001":19.0,"010":30.0,"011":18.0,"100":4.0,"101":40.0,"110":38.0,"111":1834.0},"record":["011","000","111","000","000","000","000","111","000","111","000","000","111","111","000","111","111","000","000","000","000","111","111","000","111","000","111","111","111","000","111","000","111","111","111","111","111","000","000","111","111","111","111","101","111","111","000","000","111","101","000","000","111","000","111","111","111","101","000","111","111","000","111","000","000","111","000","111","111","111","111","111","000","111","000","000","000","000","000","000","111","111","111","001","000","111","111","000","000","000","000","000","111","111","000","111","000","000","111","000","000","111","011","111","111","000","111","111","111","111","111","000","000","000","000","000","111","111","000","111","111","111","000","000","111","000","111","111","111","111","000","000","111","000","111","000","111","111","111","111","000","111","111","111","111","000","000","000","000","111","111","000","111","000","000","111","000","000","000","011","000","111","011","111","111","111","000","111","111","000","000","111","111","111","111","111","000","000","111","000","111","000","000","000","001","111","111","111","000","000","000","000","101","111","000","111","000","111","111","111","111","000","000","000","000","000","000","000","111","111","000","111","000","111","000","111","000","111","000","111","111","111","000","111","000","000","000","111","000","000","000","000","111","111","111","111","111","010","110","111","000","000","000","000","000","000","111","000","111","111","111","111","000","001","000","111","000","000","000","000","000","000","111","000","111","111","000","000","000","000","000","000","000","000","111","000","000","111","000","111","000","000","000","111","000","000","000","000","000","111","110","011","111","000","111","000","111","000","111","111","000","111","110","111","000","111","000","111","000","111","111","000","000","111","111","101","000","111","000","111","000","000","000","111","111","000","111","000","000","000","000","000","000","000","101","000","111","111","111","000","111","000","000","111","000","111","111","111","000","111","111","111","111","000","000","000","000","111","000","000","111","111","000","111","111","000","000","110","000","111","000","000","111","111","111","000","000","000","111","000","000","111","000","000","000","000","111","000","000","111","111","110","000","000","000","111","111","111","000","000","000","111","111","111","111","111","000","000","111","000","000","000","111","111","000","000","000","000","111","111","000","111","000","000","000","110","111","000","000","000","000","000","000","000","111","000","111","111","111","111","111","111","000","000","000","111","111","111","000","000","000","000","000","111","111","111","000","000","111","111","111","000","000","111","111","111","111","000","111","000","000","111","000","000","111","000","000","000","000","000","111","000","111","111","000","110","000","000","000","111","000","000","000","000","111","000","010","111","111","111","111","111","000","111","111","111","000","111","000","111","111","000"],"fidelity":0.9622,"predicted":0.9827},{"preset":"ghz","n":3,"shots":4000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"ideal":{"000":0.5,"111":0.5},"label":"GHZ chord \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"000":2029.725,"001":21.407,"010":32.946,"011":13.753,"100":0.126,"101":15.897,"110":14.98,"111":1871.166},"raw_counts":{"000":2019,"001":25,"010":38,"011":27,"100":3,"101":29,"110":30,"111":1829},"record":null,"fidelity":0.9748,"fidelity_before_readout_fix":0.9614,"predicted":0.9827,"physical_qubits":[147,137,146],"readout_flip_rates":{"read_1_when_0":[0.0013,0.0025,0.0018],"read_0_when_1":[0.0073,0.0073,0.0083]},"baseline_fidelity":0.9622}]};
-const datasets = [REAL_2, REAL_1, ...(SAMPLE ? [SAMPLE] : [])];
+// Automatic cleanup on real hardware: IBM ibm_kingston, Nov 3 2026
+const REAL_3 = {"format":"cascade-results/1","backend":"ibm_kingston","kind":"hardware","job_id":"dbl0cqt6p51s73cnh7kg","created":"2026-11-03T19:22:36+00:00","runs":[{"preset":"grover_work","label":"Grover via work qubit","n":2,"shots":4000,"work":1,"cleanup":true,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"both","gate":"CCX","inputs":["s0","s1","w0"]},{"name":"mark","gate":"Z","inputs":["both.2"]},{"name":"h0","gate":"H","inputs":["both.0"]},{"name":"h1","gate":"H","inputs":["both.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"counts":{"00":70,"01":140,"10":112,"11":3678},"ideal":{"11":1.0},"record":["11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","01","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","01","00","11","11","11","11","11","11","11","11","00","01","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","10","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","01","11","11","11","11","11","01","11","00","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","00","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","01","11","01","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","01","11","11","11","11","10","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11"],"fidelity":0.9195},{"preset":"grover_work_raw","label":"Grover via work qubit, no cleanup","n":2,"shots":4000,"work":1,"cleanup":false,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"both","gate":"CCX","inputs":["s0","s1","w0"]},{"name":"mark","gate":"Z","inputs":["both.2"]},{"name":"h0","gate":"H","inputs":["both.0"]},{"name":"h1","gate":"H","inputs":["both.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"counts":{"00":509,"01":573,"10":551,"11":2367},"ideal":{"00":0.125,"01":0.125,"10":0.125,"11":0.625},"record":["11","11","10","01","00","10","11","11","01","11","11","11","01","11","00","11","01","11","01","01","10","01","11","01","11","11","11","11","11","11","11","01","10","11","10","01","01","11","00","11","11","11","00","11","11","10","11","10","00","11","10","11","00","00","01","11","10","00","01","00","00","11","11","10","11","11","10","11","11","11","01","01","01","11","00","11","11","10","00","11","01","01","01","11","11","11","11","11","00","11","11","11","11","10","10","11","10","11","11","01","11","11","11","11","00","11","01","11","11","11","11","10","11","11","01","11","00","11","00","11","11","11","11","11","11","10","10","11","11","10","10","00","11","01","01","00","01","00","11","11","11","11","11","11","10","11","01","00","11","11","01","11","11","11","10","11","11","11","01","11","11","01","11","00","10","11","11","11","11","11","11","11","11","01","10","00","11","11","11","11","11","11","00","11","11","00","11","11","11","00","10","11","11","11","01","11","10","11","11","10","11","01","10","11","00","11","11","10","11","11","11","10","11","10","01","11","11","01","00","01","11","10","11","11","11","10","10","11","11","00","11","11","11","11","11","01","11","11","10","11","11","00","00","01","11","11","01","00","11","11","01","11","10","00","01","11","10","10","10","10","11","10","11","00","10","10","10","10","00","01","11","11","01","00","11","11","01","01","01","11","11","00","11","11","00","10","01","00","11","10","01","11","11","10","11","01","11","11","11","10","11","11","11","11","01","11","11","10","00","10","11","01","11","00","10","01","11","01","00","10","10","10","11","11","00","01","11","00","11","11","10","10","11","00","11","11","11","11","00","00","11","00","11","11","11","11","10","11","10","11","10","01","11","01","10","11","11","11","11","10","11","11","11","11","00","00","10","00","10","00","00","11","10","10","00","11","11","11","11","11","01","11","10","00","01","11","11","11","11","11","11","11","10","11","11","11","11","11","10","11","11","11","00","11","10","10","00","11","11","11","11","11","00","11","11","00","11","11","00","11","11","01","11","00","11","11","10","11","10","11","11","00","01","00","00","10","11","11","01","00","11","00","01","11","11","11","01","11","01","11","01","01","00","01","00","11","10","11","11","11","11","11","00","01","00","00","10","11","10","11","11","11","11","11","01","11","10","11","11","01","10","11","11","11","11","00","01","11","10","10","11","11","11","10","11","11","11","11","10","00","11","00","00","00","01","11","11","10","11","11","01","10"],"fidelity":0.9986}]};
+const datasets = [REAL_3, REAL_2, REAL_1, ...(SAMPLE ? [SAMPLE] : [])];
 let src='ideal', realMatch=null, recIdx=0, pinnedKey=null;
-const sigOf=(n,steps)=>n+'#'+steps.map(s=>s.gate+'('+s.qs.join(',')+')'+(GATE_INFO[s.gate].rot?(+s.theta).toFixed(3):'')).join(' ');
+const sigOf=(st,steps)=>st.n+'+'+(st.work||0)+'#'+steps.map(s=>s.gate+'('+s.qs.join(',')+')'+(GATE_INFO[s.gate].rot?(+s.theta).toFixed(3):'')).join(' ');
 function allRuns(){ const out=[]; datasets.forEach((d,di)=>d.runs.forEach((r,ri)=>out.push({d,r,key:`${di}:${ri}`}))); return out; }
-function patchState(r){ return {n:r.n,nodes:r.patch.map(p=>N_(p.name,p.gate,[...p.inputs],p.theta??0.5))}; }
+function patchState(r){ return {n:r.n,work:r.work||0,cleanup:r.cleanup!==false,nodes:r.patch.map(p=>N_(p.name,p.gate,[...p.inputs],p.theta??0.5))}; }
 function runSig(r){
-  if(r._sig===undefined){ const c=compile(patchState(r)); r._sig=c.ok?sigOf(r.n,c.steps):null; }
+  if(r._sig===undefined){ const ps=patchState(r), c=compile(ps); r._sig=c.ok?sigOf(ps,c.steps):null; }
   return r._sig;
 }
 function findMatch(res){
   if(!res.ok) return null;
-  const s=sigOf(state.n,res.steps);
+  const s=sigOf(state,res.steps);
   const m=allRuns().filter(x=>runSig(x.r)===s);
   const pin=m.find(x=>x.key===pinnedKey); if(pin) m.unshift(pin);
   else m.sort((a,b)=>((a.d.kind==='hardware'?0:1)-(b.d.kind==='hardware'?0:1)) || ((a.r.variant==='cascade'?0:1)-(b.r.variant==='cascade'?0:1)) || String(b.d.created).localeCompare(String(a.d.created)));
@@ -832,7 +929,9 @@ function renderRuns(){
       : `Sample from a noise model of IBM's ${d.backend.replace(/ \(noise model\)$/,'').replace(/^fake_/,'ibm_')}, not a real run. `)
       + (r.variant==='cascade'
           ? `Cascade's compiler: best-scoring qubits ${r.physical_qubits.join(', ')}, readout correction and decoupling. Match with ideal: ${(r.fidelity*100).toFixed(1)}%, against ${(r.baseline_fidelity*100).toFixed(1)}% for IBM's default compile in the same session (${((r.fidelity-r.baseline_fidelity)*100>=0?'+':'')}${((r.fidelity-r.baseline_fidelity)*100).toFixed(1)} points). Corrected results are probabilities, so Measure mode draws from them instead of replaying shots.`
-          : `Match with ideal: ${(r.fidelity*100).toFixed(1)}%. Real mode plays the measured counts; Measure mode replays the shots in the order they came out.`)
+          : (r.work ? (()=>{ const best=Object.entries(r.ideal).sort((a,b)=>b[1]-a[1])[0][0], got=(r.counts[best]||0)/r.shots;
+                return `Work qubit with automatic cleanup ${r.cleanup===false?'off':'on'}: the answer |${best}⟩ came up in ${(got*100).toFixed(1)}% of shots. `; })() : '')
+            + `Match with ideal: ${(r.fidelity*100).toFixed(1)}%. Real mode plays the measured counts; Measure mode replays the shots in the order they came out.`)
       + ` Measuring can't see phase, so every real note sits in the center, uncolored.`;
   } else {
     note.textContent='Pick a run above to load its patch, or load a results file from run_ibm.py. Real results show up whenever the patch matches a circuit that was run.';
@@ -852,7 +951,7 @@ $('#src-real').addEventListener('click',()=>{ if(realMatch) setSrc('real'); });
 $('#runs').addEventListener('change',e=>{
   const x=allRuns().find(y=>y.key===e.target.value); if(!x) return;
   pinnedKey=x.key;
-  state=patchState(x.r); selectedId=null; $('#qubits').value=String(x.r.n);
+  state=patchState(x.r); selectedId=null; $('#qubits').value=String(x.r.n); syncWork();
   if(PRESETS[x.r.preset]) $('#preset').value=x.r.preset;
   shots=[]; update(true);
 });
@@ -888,6 +987,7 @@ function resolver(){
   function line(ref,seen=new Set()){
     if(!ref) return null; const p=parseRef(ref);
     if(p.qubit!==undefined) return p.qubit<state.n?p.qubit:null;
+    if(p.work!==undefined) return p.work<(state.work||0)?state.n+p.work:null;
     const k=p.src+'.'+p.i; if(lm.has(k)) return lm.get(k);
     const src=by.get(p.src); if(!src||seen.has(src.name)) return null;
     seen.add(src.name); const r=line(src.inputs[p.i],seen); seen.delete(src.name); lm.set(k,r); return r;
@@ -896,7 +996,7 @@ function resolver(){
     if(dm.has(n.name)) return dm.get(n.name);
     if(seen.has(n.name)) return 1; seen.add(n.name);
     let d=1;
-    for(const r of n.inputs){ if(!r) continue; const p=parseRef(r); if(p.qubit!==undefined) continue; const s=by.get(p.src); if(s) d=Math.max(d,depth(s,seen)+1); }
+    for(const r of n.inputs){ if(!r) continue; const p=parseRef(r); if(p.source) continue; const s=by.get(p.src); if(s) d=Math.max(d,depth(s,seen)+1); }
     seen.delete(n.name); dm.set(n.name,d); return d;
   }
   return {by,line,depth};
@@ -909,9 +1009,9 @@ function placeNodes(){
   for(const n of state.nodes){
     if(n.x!=null) continue;
     let x=G.srcX+G.srcW+44+(R.depth(n)-1)*G.colW;
-    for(const r of n.inputs){ if(!r) continue; const p=parseRef(r); if(p.qubit!==undefined) continue; const s=R.by.get(p.src); if(s&&s.x!=null) x=Math.max(x,s.x+G.colW); }
+    for(const r of n.inputs){ if(!r) continue; const p=parseRef(r); if(p.source) continue; const s=R.by.get(p.src); if(s&&s.x!=null) x=Math.max(x,s.x+G.colW); }
     const l0=R.line(n.inputs[0]);
-    const y= l0!=null ? G.top+l0*G.rowH-G.padY : G.top+(state.n+spare++)*G.rowH-G.padY;
+    const y= l0!=null ? G.top+l0*G.rowH-G.padY : G.top+(state.n+(state.work||0)+spare++)*G.rowH-G.padY;
     while(overlaps(x,y,n)) x+=G.colW;
     n.x=x; n.y=y;
   }
@@ -927,23 +1027,24 @@ function renderGraph(){
   const svg=$('#graph'), R=resolver(), res=current||{ok:true,nodes:[]};
   const bad=new Set(!res.ok&&res.kind!=='wait'?res.nodes:[]), waiting=new Set(!res.ok&&res.kind==='wait'?res.nodes:[]);
   const used=consumerMap();
-  let W=G.srcX+G.srcW+60, H=G.top*2+(state.n-1)*G.rowH;
+  const TL=state.n+(state.work||0);
+  let W=G.srcX+G.srcW+60, H=G.top*2+(TL-1)*G.rowH;
   for(const n of state.nodes){ W=Math.max(W,n.x+G.nodeW+70); H=Math.max(H,n.y+nodeH(n)+30); }
   W=Math.max(W,$('#canvas-wrap').clientWidth-2);
-  const pos=ref=>{ const p=parseRef(ref); if(p.qubit!==undefined) return p.qubit<state.n?srcPort(p.qubit):null;
+  const pos=ref=>{ const p=parseRef(ref); if(p.source){ const l=R.line(ref); return l==null?null:srcPort(l); }
     const s=R.by.get(p.src); return s&&s.x!=null&&p.i<GATE_INFO[s.gate].k?outPort(s,p.i):null; };
   const curve=(a,b)=>{ const dx=Math.max(30,Math.abs(b.x-a.x)/2); return `M${a.x} ${a.y} C${a.x+dx} ${a.y} ${b.x-dx} ${b.y} ${b.x} ${b.y}`; };
   let s=`<rect class="g-bg" x="0" y="0" width="${W}" height="${H}"/>`;
-  for(let q=0;q<state.n;q++){ const p=srcPort(q); s+=`<line class="g-guide" x1="${p.x}" y1="${p.y}" x2="${W}" y2="${p.y}"/>`; }
+  for(let q=0;q<TL;q++){ const p=srcPort(q); s+=`<line class="g-guide" x1="${p.x}" y1="${p.y}" x2="${W}" y2="${p.y}"/>`; }
   for(const n of state.nodes) n.inputs.forEach((r,j)=>{
     if(!r) return; const a=pos(r); if(!a) return;
     const clone=(used.get(norm(r))||[]).length>1;
     s+=`<path class="g-wire${clone?' clone':''}" d="${curve(a,inPort(n,j))}" style="stroke:${clone?'var(--err)':lineColor(R.line(r))}"/>`;
   });
-  for(let q=0;q<state.n;q++){
-    const p=srcPort(q);
-    s+=`<g class="g-src"><rect x="${G.srcX}" y="${p.y-13}" width="${G.srcW}" height="26" rx="13" style="stroke:${lineColor(q)}"/><text x="${G.srcX+G.srcW/2-3}" y="${p.y+4}" text-anchor="middle">q${q}</text></g>`
-      +portSvg('out',`q${q}`,p,used.has(`q${q}.0`),lineColor(q));
+  for(let q=0;q<TL;q++){
+    const p=srcPort(q), lbl=q<state.n?`q${q}`:`w${q-state.n}`;
+    s+=`<g class="g-src${q<state.n?'':' work'}"><title>${q<state.n?'Qubit '+lbl:'Work qubit '+lbl+': scratch space that starts at |0⟩. Write it with X, CX or CCX, then read it; Cascade cleans it up.'}</title><rect x="${G.srcX}" y="${p.y-13}" width="${G.srcW}" height="26" rx="13" style="stroke:${lineColor(q)}"/><text x="${G.srcX+G.srcW/2-3}" y="${p.y+4}" text-anchor="middle">${lbl}</text></g>`
+      +portSvg('out',lbl,p,used.has(`${lbl}.0`),lineColor(q));
   }
   for(const n of state.nodes){
     const info=GATE_INFO[n.gate], h=nodeH(n);
@@ -973,7 +1074,7 @@ function connect(from,id,j,detach){
   const restore=()=>{ if(detach){ const d=byId(detach.id); if(d) d.inputs[detach.j]=detach.orig; } };
   if(!n){ restore(); return update(true); }
   const p=parseRef(from);
-  if(p.qubit===undefined){
+  if(!p.source){
     if(p.src===n.name){ restore(); toast(`${n.name} can't feed itself.`); return update(true); }
     if(descendants(n.name).has(p.src)){ restore(); toast(`That would make a loop: ${n.name} already feeds ${p.src}.`); return update(true); }
   }
@@ -1059,7 +1160,7 @@ window.addEventListener('resize',()=>{ if(!drag) renderGraph(); });
 /* ---------------- the cascade ---------------- */
 function update(editor){
   const res=compile(state); current=res;
-  if(res.ok){ const {probs,phases}=simulate(state.n,res.steps); lastGood={n:state.n,probs,phases,steps:res.steps}; }
+  if(res.ok){ const {probs,phases,clean}=simulate(state.n,state.work,res.steps); lastGood={n:state.n,work:state.work||0,probs,phases,clean,steps:res.steps}; }
   const prevKey=realMatch&&realMatch.key;
   realMatch=findMatch(res);
   if((realMatch&&realMatch.key)!==prevKey) recIdx=0;
@@ -1078,6 +1179,14 @@ function update(editor){
 for(const [k,p] of Object.entries(PRESETS)) $('#preset').append(el('option',{value:k,text:p.label}));
 $('#preset').addEventListener('change',e=>loadPreset(e.target.value));
 $('#qubits').addEventListener('change',e=>{ state.n=+e.target.value; shots=[]; update(true); });
+function syncWork(){
+  $('#work').value=String(state.work||0);
+  const b=$('#cleanup'); b.disabled=!(state.work>0);
+  b.setAttribute('aria-pressed',String(state.cleanup!==false));
+  b.textContent=state.cleanup!==false?'Auto cleanup: on':'Auto cleanup: off';
+}
+$('#work').addEventListener('change',e=>{ state.work=+e.target.value; syncWork(); shots=[]; update(true); });
+$('#cleanup').addEventListener('click',()=>{ state.cleanup=state.cleanup===false; syncWork(); shots=[]; update(true); });
 setView(view,false);
 loadPreset('dial');
 </script>

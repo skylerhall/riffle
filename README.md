@@ -31,6 +31,26 @@ so wiring one output into two gates is a compile error and the edit is rolled ba
 NoCloningError: wire 'a' feeds both 'copy1' and 'copy2' — a qubit's state can't be copied
 ```
 
+### Work qubits with automatic cleanup
+
+Many quantum algorithms need scratch qubits: compute something into a spare qubit, use it,
+then put it back to |0⟩. Forget that last step and the leftover scratch value silently
+ruins the interference the algorithm depends on. Most quantum languages leave this
+to the programmer. Cascade does it for you:
+
+```python
+c = Cascade(2, work=1)               # w0 is a work qubit that starts at |0>
+c["both"] = CCX("s0", "s1", "w0")    # compute: w0 = q0 AND q1
+c["mark"] = Z("both.2")              # use it
+# the compiler adds the undo of `both` right after w0's last use,
+# spliced in before anything changes q0 or q1 again
+```
+
+The rules are checked at compile time. A work qubit may only be written by X, CX or CCX and then
+only read (as a control, or by Z, S, T, RZ, CZ). Anything else, or changing a control qubit before
+the work qubit's last read, is a compile error with an explanation, because no automatic cleanup
+could be correct. `Cascade(..., cleanup=False)` shows what happens without it.
+
 ## Results on real quantum hardware
 
 Every circuit here has run on IBM's 156-qubit Heron processors through the free
@@ -54,6 +74,17 @@ The Cascade compiler ([`mitigate.py`](mitigate.py)) does three things:
 2. **Readout correction**: runs two calibration circuits on the exact physical qubits used,
    measures each qubit's misread rates, and inverts that bias.
 3. **Dynamical decoupling**: pulse pairs in idle moments to cancel drift.
+
+### Automatic cleanup on real hardware (ibm_kingston, Nov 3 2026, 4,000 shots each)
+
+Grover search marking its answer through a work qubit:
+
+| | Found the answer |11⟩ | Work qubit back at |0⟩ (simulated) |
+|---|---|---|
+| **With automatic cleanup** | **92.0%** | 100% |
+| Without cleanup | 59.2% | 75% |
+
+Without cleanup even a perfect machine tops out at 62.5%; the hardware result tracks that.
 
 ### First run, all presets (ibm_kingston, Nov 3 2026, 2,000 shots, default compile)
 
@@ -93,14 +124,15 @@ python -m pytest tests         # test suite
 
 1. Create a free account at [quantum.cloud.ibm.com](https://quantum.cloud.ibm.com) (Open Plan, us-east) and copy your API key.
 2. Save the key as plain text in `ibm_key.txt` in this folder. It's in `.gitignore` and never leaves your machine.
-3. On a Mac, double-click `run_on_ibm.command` (all presets) or `compare_on_ibm.command`
-   (default vs. Cascade compiler). Or from a terminal:
+3. On a Mac, double-click `run_on_ibm.command` (all presets), `compare_on_ibm.command`
+   (default vs. Cascade compiler) or `cleanup_on_ibm.command` (work qubit with vs. without cleanup). Or from a terminal:
 
 ```bash
 python run_ibm.py                        # all presets on the least busy machine
 python run_ibm.py --compare              # IBM default vs. Cascade compiler, side by side
 python run_ibm.py --patch my_patch.json  # your own circuit, exported from Cascade Listen
 python run_ibm.py --fake                 # noise model of ibm_kingston, no account (pip install qiskit-aer)
+python run_ibm.py --only grover_work grover_work_raw   # work-qubit Grover with and without cleanup
 ```
 
 Results land in `results/`. Load them in Cascade Listen with **Load results**.
@@ -110,7 +142,7 @@ A full run uses a few seconds of the Open Plan's 10 free minutes per 28 days.
 
 | File | What it is |
 |---|---|
-| `cascade.py` | The language: gates, graph compiler, statevector simulator, Qiskit export |
+| `cascade.py` | The language: gates, graph compiler, work-qubit cleanup, statevector simulator, Qiskit export |
 | `mitigate.py` | The noise-fighting compiler: placement scoring, readout correction |
 | `run_ibm.py` | Sends circuits to IBM Quantum and saves results |
 | `cascade_listen.html` | The browser instrument |
@@ -123,7 +155,6 @@ A full run uses a few seconds of the Open Plan's 10 free minutes per 28 days.
 Cascade is an experiment in what a quantum language should feel like to write: graph-shaped,
 live, and strict about physics at compile time. Next up:
 
-- automatic uncomputation (cleaning up temporary qubits), which fits a graph model naturally
 - export to HUGR, the graph-based format behind Quantinuum's Guppy, alongside OpenQASM 3
 
 ## License

@@ -1,5 +1,5 @@
-"""Four short demos of cascade-style quantum coding. Run: python demo.py"""
-from cascade import Cascade, CascadeError, NoCloningError, H, X, Z, CX, CZ
+"""Five short demos of cascade-style quantum coding. Run: python demo.py"""
+from cascade import Cascade, CascadeError, NoCloningError, H, X, Z, CX, CZ, CCX
 
 
 def show(title):
@@ -51,6 +51,25 @@ try:
     bad["copy2"] = X("a")
 except NoCloningError as e:
     print("NoCloningError:", e)
+
+# 5 ─ Work qubits: scratch space the compiler cleans up for you.
+show("5. Automatic cleanup of a work qubit")
+def grover_via_work(cleanup):
+    w = Cascade(2, work=1, cleanup=cleanup)
+    with w.batch():
+        w["s0"], w["s1"] = H("q0"), H("q1")
+        w["both"] = CCX("s0", "s1", "w0")      # scratch: w0 = q0 AND q1
+        w["mark"] = Z("both.2")                # use it to mark the answer
+        w["h0"], w["h1"] = H("both.0"), H("both.1")
+        w["x0"], w["x1"] = X("h0"), X("h1")
+        w["mirror"] = CZ("x0", "x1")
+        w["u0"], w["u1"] = X("mirror.0"), X("mirror.1")
+        w["out0"], w["out1"] = H("u0"), H("u1")
+    return w
+print("With automatic cleanup (the ○ gate is the undo Cascade added):")
+print(grover_via_work(True), "\n")
+print("Without it, the leftover scratch qubit spoils the interference:")
+print(grover_via_work(False))
 
 # Optional: hand the same graph to real quantum tooling.
 try:

@@ -18,6 +18,21 @@ Inputs:
 
 Because quantum states can't be copied, each wire can feed exactly one
 node. Cascade enforces that rule (the no-cloning theorem) at compile time.
+
+Work qubits and automatic cleanup:
+
+    c = Cascade(2, work=1)              # w0 is a scratch qubit that starts at |0>
+    c["both"] = CCX("a", "b", "w0")     # compute: w0 = a AND b
+    c["mark"] = Z("both.2")             # use it
+    # ...the compiler adds the undo of `both` right after w0's last use,
+    # wired in before anything changes a or b again, so w0 returns to |0>
+    # and doesn't spoil the interference. Cascade(..., cleanup=False) shows
+    # what happens without it.
+
+A work qubit may only be written by X, CX or CCX (all classical and
+self-inverse), and only read afterwards: as a control, or by a phase gate
+(Z, S, T, RZ, CZ). Anything else is a compile error, because no automatic
+cleanup could be correct.
 """
 from __future__ import annotations
 
@@ -103,11 +118,16 @@ def SWAP(a, b):
 
 # ---------------------------------------------------------------- result
 class Result:
-    def __init__(self, n, state, steps, shots=0, seed=None):
+    def __init__(self, n, state, steps, shots=0, seed=None, work=0):
         self.n = n
+        self.work = work
         self.state = state.reshape(-1)
         self.steps = steps
-        probs = np.abs(self.state) ** 2
+        full = np.abs(state) ** 2
+        # work qubits are scratch space: report the main qubits only
+        main = full.reshape((2 ** n, 2 ** work)).sum(axis=1) if work else full.reshape(-1)
+        self.work_clean = float(full.reshape((2 ** n, 2 ** work))[:, 0].sum()) if work else 1.0
+        probs = main
         self.probabilities = {
             format(i, f"0{n}b"): float(p) for i, p in enumerate(probs) if p > 1e-9
         }
@@ -126,17 +146,32 @@ class Result:
             lines.append(f"  |{bits}>  {p:6.1%}  {bar}")
         if self.counts:
             lines.append("  shots: " + ", ".join(f"{k}:{v}" for k, v in sorted(self.counts.items())))
+        if self.work:
+            clean = "clean" if self.work_clean > 1 - 1e-9 else f"NOT clean ({self.work_clean:.1%} back at |0>)"
+            lines.append(f"  work qubits: {clean}")
         return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- cascade
 _NAME = re.compile(r"[A-Za-z_]\w*")
 _QUBIT = re.compile(r"q(\d+)")
+_WORK = re.compile(r"w(\d+)")
+
+# For work-qubit cleanup: input slots that flip a work qubit (classical, self-inverse) ...
+_WRITES = {"X": {0}, "CX": {1}, "CCX": {2}}
+# ... and slots that leave a qubit's 0/1 value unchanged (controls and phase gates).
+_READS = {"CX": {0}, "CCX": {0, 1}, "CZ": {0, 1}, "Z": {0}, "S": {0}, "T": {0}, "RZ": {0}}
+
+
+def _is_source(ref):
+    return bool(_QUBIT.fullmatch(ref) or _WORK.fullmatch(ref))
 
 
 class Cascade:
-    def __init__(self, n_qubits, shots=0, seed=None):
+    def __init__(self, n_qubits, shots=0, seed=None, work=0, cleanup=True):
         self.n = n_qubits
+        self.work = work
+        self.cleanup = cleanup
         self.shots = shots
         self.seed = seed
         self.nodes: dict[str, Gate] = {}
@@ -147,8 +182,8 @@ class Cascade:
 
     # -- editing --------------------------------------------------------
     def __setitem__(self, name, gate):
-        if not _NAME.fullmatch(name) or _QUBIT.fullmatch(name):
-            raise CascadeError(f"bad node name {name!r} (q0, q1... are reserved)")
+        if not _NAME.fullmatch(name) or _is_source(name):
+            raise CascadeError(f"bad node name {name!r} (q0, q1... and w0, w1... are reserved)")
         if not isinstance(gate, Gate):
             raise CascadeError("node value must be a gate, e.g. H('q0')")
         before = dict(self.nodes)
@@ -201,31 +236,53 @@ class Cascade:
     def _parse(self, ref):
         m = _QUBIT.fullmatch(ref)
         if m:
-            q = int(m.group(1))
-            if q >= self.n:
+            if int(m.group(1)) >= self.n:
                 raise CascadeError(f"{ref!r}: only {self.n} qubits exist")
+            return (ref, 0)
+        m = _WORK.fullmatch(ref)
+        if m:
+            if int(m.group(1)) >= self.work:
+                raise CascadeError(f"{ref!r}: only {self.work} work qubits exist")
             return (ref, 0)
         name, _, idx = ref.partition(".")
         return (name, int(idx) if idx else 0)
 
     def compile(self):
         """Return ordered steps [(node_name, gate, qubit_indices)].
-        Raises CascadeError if the graph is incomplete or invalid."""
+        Raises CascadeError if the graph is incomplete or invalid.
+        With work qubits and cleanup on, the steps include the automatic
+        undo gates (their names end in ~undo)."""
+        steps = self._compile_nodes(self.nodes)
+        if not (self.work and self.cleanup):
+            return steps
+        expanded = self._with_cleanup()
+        try:
+            return self._compile_nodes(expanded)
+        except CascadeError as e:
+            if "cycle" not in str(e):
+                raise
+            raise CascadeError(
+                "a work qubit can't be cleaned up automatically: one of the qubits used to compute it "
+                "is changed before the work qubit's last use. Read the work qubit first, or change "
+                "that qubit later."
+            ) from None
+
+    def _compile_nodes(self, nodes):
         missing, consumers, deps = set(), {}, {}
-        for name, gate in self.nodes.items():
+        for name, gate in nodes.items():
             deps[name] = set()
             for ref in gate.inputs:
                 src, i = self._parse(ref)
-                if not _QUBIT.fullmatch(src):
-                    if src not in self.nodes:
+                if not _is_source(src):
+                    if src not in nodes:
                         missing.add(src)
                         continue
-                    if i >= self.nodes[src].arity:
+                    if i >= nodes[src].arity:
                         raise CascadeError(f"{name}: {src!r} has no output .{i}")
                     deps[name].add(src)
                 wire = (src, i)
                 if wire in consumers:
-                    w = src if _QUBIT.fullmatch(src) or self.nodes[src].arity == 1 else f"{src}.{i}"
+                    w = src if _is_source(src) or nodes[src].arity == 1 else f"{src}.{i}"
                     raise NoCloningError(
                         f"wire {w!r} feeds both {consumers[wire]!r} and {name!r} "
                         "— a qubit's state can't be copied"
@@ -235,25 +292,26 @@ class Cascade:
             raise CascadeError("waiting on: " + ", ".join(sorted(missing)))
 
         # topological sort (Kahn), stable by declaration order
-        order, ready = [], [n for n in self.nodes if not deps[n]]
+        order, ready = [], [n for n in nodes if not deps[n]]
         remaining = {n: set(d) for n, d in deps.items()}
         while ready:
             n = ready.pop(0)
             order.append(n)
-            for m in self.nodes:
+            for m in nodes:
                 if n in remaining[m]:
                     remaining[m].discard(n)
                     if not remaining[m] and m not in order and m not in ready:
                         ready.append(m)
-        if len(order) != len(self.nodes):
-            stuck = [n for n in self.nodes if n not in order]
+        if len(order) != len(nodes):
+            stuck = [n for n in nodes if n not in order]
             raise CascadeError("cycle between: " + ", ".join(stuck))
 
-        # follow each wire back to its physical qubit
+        # follow each wire back to its physical qubit (work qubits come after the main ones)
         qubit_of = {(f"q{q}", 0): q for q in range(self.n)}
+        qubit_of.update({(f"w{k}", 0): self.n + k for k in range(self.work)})
         steps = []
         for name in order:
-            gate = self.nodes[name]
+            gate = nodes[name]
             qs = [qubit_of[self._parse(r)] for r in gate.inputs]
             if len(set(qs)) != len(qs):
                 raise CascadeError(f"{name}: uses the same qubit twice")
@@ -262,17 +320,90 @@ class Cascade:
             steps.append((name, gate, qs))
         return steps
 
+    # -- automatic cleanup -----------------------------------------------
+    def _with_cleanup(self):
+        """Rewrite the graph so every work qubit returns to |0>.
+
+        For each work qubit, its writes are undone in reverse order, right after
+        its last read. Each undo gate is spliced into the control qubits' lines
+        just before the first gate that would change them, so the controls still
+        hold the values they had when the work qubit was computed."""
+        nodes = dict(self.nodes)
+
+        def consumers():
+            return {self._parse(ref): (name, j) for name, g in nodes.items() for j, ref in enumerate(g.inputs)}
+
+        def ref_of(name, i):
+            return name if nodes[name].arity == 1 else f"{name}.{i}"
+
+        def rewire(name, slot, ref):
+            g = nodes[name]
+            inputs = list(g.inputs); inputs[slot] = ref
+            new = Gate(g.name, g.matrix, inputs, g.params)
+            new.auto = getattr(g, "auto", False)
+            nodes[name] = new
+
+        for k in range(self.work):
+            line, cons, wire = [], consumers(), (f"w{k}", 0)
+            while wire in cons:
+                wire = cons[wire]
+                line.append(wire)
+            writes, last_read = [], None
+            for name, j in line:
+                g = nodes[name].name
+                if j in _WRITES.get(g, ()):
+                    if last_read:
+                        raise CascadeError(
+                            f"w{k} is written by {name!r} after {last_read!r} has read it. "
+                            "Automatic cleanup needs every write to a work qubit before its first read.")
+                    writes.append((name, j))
+                elif j in _READS.get(g, ()):
+                    last_read = name
+                else:
+                    raise CascadeError(
+                        f"{name!r} ({g}) changes work qubit w{k} in a way that can't be undone automatically. "
+                        "Work qubits can only be written by X, CX or CCX, then read as a control or by a phase gate.")
+            if not writes:
+                continue
+            end = line[-1]  # the work qubit's open end
+            for name, j in reversed(writes):
+                g = nodes[name]
+                undo_name = f"{name}~undo"
+                inputs, splice = [], []
+                for s_ in range(g.arity):
+                    if s_ == j:
+                        inputs.append(ref_of(*end))
+                        continue
+                    # walk this control's line forward past gates that only read it
+                    cons, w = consumers(), (name, s_)
+                    while w in cons:
+                        m, t = cons[w]
+                        if t in _READS.get(nodes[m].name, ()):
+                            w = (m, t)
+                        else:
+                            splice.append((m, t, s_))  # first gate that changes it: feed it the undo's output
+                            break
+                    inputs.append(ref_of(*w))
+                undo = Gate(g.name, g.matrix, inputs, g.params)  # X, CX and CCX are their own inverse
+                undo.auto = True
+                nodes[undo_name] = undo
+                for m, t, s_ in splice:
+                    rewire(m, t, f"{undo_name}.{s_}" if undo.arity > 1 else undo_name)
+                end = (undo_name, j)
+        return nodes
+
     # -- running --------------------------------------------------------
     def run(self):
         steps = self.compile()
-        state = np.zeros((2,) * self.n, dtype=complex)
-        state[(0,) * self.n] = 1
+        total = self.n + self.work
+        state = np.zeros((2,) * total, dtype=complex)
+        state[(0,) * total] = 1
         for _, gate, qs in steps:
             k = len(qs)
             U = gate.matrix.reshape((2,) * (2 * k))
             state = np.tensordot(U, state, axes=(list(range(k, 2 * k)), qs))
             state = np.moveaxis(state, list(range(k)), qs)
-        return Result(self.n, state, steps, self.shots, self.seed)
+        return Result(self.n, state, steps, self.shots, self.seed, work=self.work)
 
     def _cascade(self):
         try:
@@ -288,13 +419,18 @@ class Cascade:
     # -- views ----------------------------------------------------------
     def diagram(self):
         steps = self.compile()
-        rows = [f"q{q}: " for q in range(self.n)]
+        total = self.n + self.work
+        rows = [f"q{q}: " for q in range(self.n)] + [f"w{k}: " for k in range(self.work)]
         sym = {"CX": ["●", "⊕"], "CZ": ["●", "●"], "CCX": ["●", "●", "⊕"], "SWAP": ["×", "×"]}
+        auto_sym = {"CX": ["○", "⊕"], "CCX": ["○", "○", "⊕"], "X": ["x"]}
+        any_auto = False
         for _, gate, qs in steps:
-            marks = sym.get(gate.name, [gate.name] * len(qs))
+            auto = getattr(gate, "auto", False)
+            any_auto |= auto
+            marks = (auto_sym if auto else sym).get(gate.name, [gate.name] * len(qs))
             w = max(len(m) for m in marks) + 2
             lo, hi = min(qs), max(qs)
-            for q in range(self.n):
+            for q in range(total):
                 if q in qs:
                     cell = marks[qs.index(q)].center(w, "─")
                 elif lo < q < hi:
@@ -302,19 +438,26 @@ class Cascade:
                 else:
                     cell = "─" * w
                 rows[q] += cell
-        return "\n".join(r + "─" for r in rows)
+        out = "\n".join(r + "─" for r in rows)
+        if any_auto:
+            out += "\n    (○ / x = added by Cascade to return work qubits to |0>)"
+        return out
 
     def __str__(self):
         if self.result is None:
             return f"[cascade] {self.status}"
         return self.diagram() + "\n" + str(self.result)
 
-    def to_qiskit(self):
-        """Export to a Qiskit QuantumCircuit (requires `pip install qiskit`)."""
-        from qiskit import QuantumCircuit
+    def to_qiskit(self, measure=False):
+        """Export to a Qiskit QuantumCircuit (requires `pip install qiskit`).
+        measure=True adds a 'meas' register reading the main qubits (not the work qubits)."""
+        from qiskit import ClassicalRegister, QuantumCircuit
 
-        qc = QuantumCircuit(self.n)
+        qc = QuantumCircuit(self.n + self.work)
         for _, gate, qs in self.compile():
             m = getattr(qc, {"CX": "cx", "CZ": "cz", "CCX": "ccx", "SWAP": "swap"}.get(gate.name, gate.name.lower()))
             m(*gate.params, *qs)
+        if measure:
+            qc.add_register(ClassicalRegister(self.n, "meas"))
+            qc.measure(range(self.n), range(self.n))
         return qc

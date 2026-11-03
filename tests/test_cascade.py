@@ -95,3 +95,83 @@ def test_readout_correction_recovers_truth():
     fixed = M.correct_readout(noisy, e0, e1)
     assert M.fidelity(true, noisy) < 0.95
     assert M.fidelity(true, fixed) > 0.9999
+
+
+# ---------------------------------------------------------------- work qubits + automatic cleanup
+from cascade import CCX  # noqa: E402
+
+
+def _grover_via_work(cleanup=True):
+    g = Cascade(2, work=1, cleanup=cleanup)
+    with g.batch():
+        g["s0"], g["s1"] = H("q0"), H("q1")
+        g["both"] = CCX("s0", "s1", "w0")       # w0 = q0 AND q1
+        g["mark"] = Z("both.2")                # phase flip through the work qubit
+        g["h0"], g["h1"] = H("both.0"), H("both.1")
+        g["x0"], g["x1"] = X("h0"), X("h1")
+        g["mirror"] = CZ("x0", "x1")
+        g["u0"], g["u1"] = X("mirror.0"), X("mirror.1")
+        g["out0"], g["out1"] = H("u0"), H("u1")
+    return g
+
+
+def test_cleanup_restores_interference():
+    g = _grover_via_work()
+    assert approx(g.result.probabilities, {"11": 1})
+    assert g.result.work_clean > 1 - 1e-9
+    names = [name for name, *_ in g.compile()]
+    assert "both~undo" in names
+    assert names.index("both~undo") > names.index("mark")      # after the work qubit's last read
+    assert names.index("both~undo") < names.index("h0")        # before the controls change
+    assert "both~undo" not in g.nodes                          # the user's graph is untouched
+
+
+def test_without_cleanup_the_garbage_spoils_it():
+    g = _grover_via_work(cleanup=False)
+    assert abs(g.result.probabilities["11"] - 0.625) < 1e-9
+    assert abs(g.result.work_clean - 0.75) < 1e-9
+
+
+def test_several_writes_are_undone_in_reverse():
+    c = Cascade(2, work=1)
+    with c.batch():
+        c["a"], c["b"] = H("q0"), H("q1")
+        c["flip"] = X("w0")                 # w0 = 1
+        c["both"] = CCX("a", "b", "flip")   # w0 = NOT(a AND b)
+        c["mark"] = Z("both.2")
+    names = [name for name, *_ in c.compile()]
+    assert names.index("both~undo") < names.index("flip~undo")
+    assert c.result.work_clean > 1 - 1e-9
+    assert approx(c.result.probabilities, {"00": 0.25, "01": 0.25, "10": 0.25, "11": 0.25})
+
+
+def test_work_qubit_rules():
+    c = Cascade(1, work=1)
+    c["bad"] = H("w0")                       # H can't be undone by a classical uncompute
+    assert c.result is None and "can't be undone automatically" in c.status
+
+    c = Cascade(2, work=1)
+    with c.batch():
+        c["a"] = CX("q0", "w0")
+        c["read"] = CZ("a.1", "q1")
+        c["again"] = CX("a.0", "read.0")     # writes w0 after it was read
+    assert c.result is None and "after" in c.status
+
+
+def test_control_changed_before_last_read_is_rejected():
+    c = Cascade(2, work=1)
+    with c.batch():
+        c["s0"], c["s1"] = H("q0"), H("q1")
+        c["both"] = CCX("s0", "s1", "w0")
+        c["h0"] = H("both.0")                # q0 changes ...
+        c["mark"] = CZ("h0", "both.2")       # ... before w0 is read
+    assert c.result is None and "can't be cleaned up" in c.status
+
+
+def test_work_qubits_are_reserved_and_bounded():
+    c = Cascade(1, work=1)
+    with pytest.raises(CascadeError):
+        c["w0"] = H("q0")
+    with pytest.raises(CascadeError):
+        c["a"] = X("w3")
+        c.compile()

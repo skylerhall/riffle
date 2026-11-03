@@ -54,6 +54,17 @@ def _grover(c):
 def _ghz(c):
     c["s"] = H("q0"); c["link1"] = CX("s", "q1"); c["link2"] = CX("link1.0", "q2")
 
+def _grover_work(c):
+    c["s0"], c["s1"] = H("q0"), H("q1")
+    c["both"] = CCX("s0", "s1", "w0")      # work qubit w0 = q0 AND q1
+    c["mark"] = Z("both.2")               # phase-flip |11> through the work qubit
+    c["h0"], c["h1"] = H("both.0"), H("both.1")
+    c["x0"], c["x1"] = X("h0"), X("h1")
+    c["mirror"] = CZ("x0", "x1")
+    c["u0"], c["u1"] = X("mirror.0"), X("mirror.1")
+    c["out0"], c["out1"] = H("u0"), H("u1")
+
+
 def _rainbow(c):
     c["h0"], c["h1"], c["h2"] = H("q0"), H("q1"), H("q2")
     c["p0"], c["p1"], c["p2"] = S("h0"), T("h1"), RZ(0.25 * math.pi, "h2")
@@ -64,7 +75,11 @@ PRESETS = {  # name: (label, qubits, builder)
     "grover": ("Grover search", 2, _grover),
     "ghz": ("GHZ chord", 3, _ghz),
     "rainbow": ("Phase rainbow", 3, _rainbow),
+    # Grover through a work qubit, with Cascade's automatic cleanup and without it
+    "grover_work": ("Grover via work qubit", 2, _grover_work, {"work": 1}),
+    "grover_work_raw": ("Grover via work qubit, no cleanup", 2, _grover_work, {"work": 1, "cleanup": False}),
 }
+DEFAULT_RUN = ["dial", "bell", "grover", "ghz", "rainbow"]
 
 
 GATE_FNS = {"H": H, "X": X, "Y": Y, "Z": Z, "S": S, "T": T, "RX": RX, "RY": RY, "RZ": RZ,
@@ -83,13 +98,14 @@ def add_patch_file(path):
             c[p["name"]] = g(p["theta"] * math.pi, *p["inputs"]) if "theta" in p else g(*p["inputs"])
 
     key = pathlib.Path(path).stem
-    PRESETS[key] = (d.get("label") or key, int(d["n"]), fn)
+    opts = {"work": int(d.get("work", 0)), "cleanup": bool(d.get("cleanup", True))}
+    PRESETS[key] = (d.get("label") or key, int(d["n"]), fn, opts)
     return key
 
 
 def build(key):
-    label, n, fn = PRESETS[key]
-    c = Cascade(n)
+    label, n, fn, *extra = PRESETS[key]
+    c = Cascade(n, **(extra[0] if extra else {}))
     with c.batch():
         fn(c)
     return label, c
@@ -139,8 +155,7 @@ def run(keys, shots=2000, fake=False, backend_name=None, record=512):
     jobs = []
     for k in keys:
         label, c = build(k)
-        qc = c.to_qiskit()
-        qc.measure_all()
+        qc = c.to_qiskit(measure=True)
         jobs.append((k, label, c, qc))
 
     pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
@@ -162,7 +177,7 @@ def run(keys, shots=2000, fake=False, backend_name=None, record=512):
         ideal = c.run().probabilities
         fid = sum(math.sqrt(ideal.get(b, 0) * counts.get(b, 0) / shots) for b in set(ideal) | set(counts)) ** 2
         runs.append({
-            "preset": k, "label": label, "n": c.n, "shots": shots,
+            "preset": k, "label": label, "n": c.n, "shots": shots, "work": c.work, "cleanup": c.cleanup,
             "patch": patch_of(c),
             "counts": dict(sorted(counts.items())),
             "ideal": {b: round(p, 6) for b, p in sorted(ideal.items())},
@@ -211,7 +226,7 @@ def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
     items = []
     for k in keys:
         label, c = build(k)
-        qc = c.to_qiskit(); qc.measure_all()
+        qc = c.to_qiskit(measure=True)
         default, d_score, best, b_score = M.best_transpile(qc, backend)
         phys = M.physical_qubits(best, c.n)
         items.append(dict(k=k, label=label, c=c, default=default, best=best, d_score=d_score,
@@ -288,5 +303,5 @@ if __name__ == "__main__":
         keys = [add_patch_file(f) for f in a.patch] if a.patch else (a.only or ["bell", "grover", "ghz"])
         run_compare(keys, shots=a.shots if a.shots != 2000 else 4000, fake=a.fake, backend_name=a.backend)
     else:
-        keys = [add_patch_file(f) for f in a.patch] if a.patch else (a.only or list(PRESETS))
+        keys = [add_patch_file(f) for f in a.patch] if a.patch else (a.only or DEFAULT_RUN)
         run(keys, shots=a.shots, fake=a.fake, backend_name=a.backend)
