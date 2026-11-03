@@ -96,6 +96,33 @@ Without cleanup even a perfect machine tops out at 62.5%; the hardware result tr
 | Bell pair | 95.4% |
 | Grover search | 91.9% |
 
+## Runs on Quantinuum's stack too (HUGR)
+
+Cascade compiles to two vendors' formats. Besides OpenQASM 3 for IBM, [`quantinuum.py`](quantinuum.py)
+writes each circuit as a **Guppy** program, Quantinuum's quantum language, and lets Guppy's own
+compiler turn it into **HUGR**, the graph-based format behind their Helios computer. The HUGR is
+then run on Quantinuum's open-source **Selene** emulator and checked against Cascade's simulator:
+
+| Circuit | HUGR nodes | Selene matches Cascade |
+|---|---|---|
+| Interference dial | 17 | 100.0% |
+| Bell pair | 14 | 100.0% |
+| Grover search | 24 | 100.0% |
+| GHZ chord | 19 | 100.0% |
+| Phase rainbow (8 outcomes) | 28 | 99.8% |
+| Grover via work qubit (cleanup included) | 28 | 100.0% |
+
+(2,000 shots each; the 99.8% is ordinary sampling noise across 8 equally likely outcomes.)
+
+Guppy, like Cascade, treats qubits as values that can't be copied, so the two fit naturally:
+each Cascade wire becomes one Guppy variable, and a SWAP becomes a renaming with no gates at all.
+The exported `.hugr` packages and Guppy sources are in [`hugr/`](hugr/).
+
+```bash
+pip install guppylang selene-sim
+python quantinuum.py        # export every preset to hugr/ and check each on Selene
+```
+
 ## Cascade Listen
 
 [`cascade_listen.html`](cascade_listen.html) is a browser instrument for the language. Open it in any
@@ -110,7 +137,7 @@ and hear the circuit as you go:
 - **Real** mode plays what IBM's machine actually measured, including the noise, and Measure mode
   replays the machine's shots in the order they came out.
 
-It exports any patch to OpenQASM 3, to `cascade.py` code, or to a patch file that `run_ibm.py` can send to IBM.
+It exports any patch to OpenQASM 3 (IBM), Guppy (Quantinuum), `cascade.py` code, or a patch file that `run_ibm.py` can send to IBM.
 
 ## Run it yourself
 
@@ -144,10 +171,12 @@ A full run uses a few seconds of the Open Plan's 10 free minutes per 28 days.
 |---|---|
 | `cascade.py` | The language: gates, graph compiler, work-qubit cleanup, statevector simulator, Qiskit export |
 | `mitigate.py` | The noise-fighting compiler: placement scoring, readout correction |
+| `quantinuum.py` | Export to Guppy and HUGR, and verification on Quantinuum's Selene emulator |
 | `run_ibm.py` | Sends circuits to IBM Quantum and saves results |
 | `cascade_listen.html` | The browser instrument |
 | `demo.py` | Demos: out-of-order code, interference, Grover search, no-cloning |
 | `tests/` | Test suite |
+| `hugr/` | Every preset as a `.hugr` package plus its Guppy source |
 | `results/` | Real hardware runs (plus one clearly labeled noise-model sample) |
 
 ## Where this is going
@@ -155,7 +184,8 @@ A full run uses a few seconds of the Open Plan's 10 free minutes per 28 days.
 Cascade is an experiment in what a quantum language should feel like to write: graph-shaped,
 live, and strict about physics at compile time. Next up:
 
-- export to HUGR, the graph-based format behind Quantinuum's Guppy, alongside OpenQASM 3
+- a run on Quantinuum's Helios hardware, which needs a Quantinuum Nexus account
+- loops and mid-circuit measurement, which HUGR supports and Cascade doesn't express yet
 
 ## License
 
