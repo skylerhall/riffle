@@ -68,11 +68,14 @@ The Cascade compiler ([`mitigate.py`](mitigate.py)) does three things:
 ## Cascade Listen
 
 [`cascade_listen.html`](cascade_listen.html) is a browser instrument for the language. Open it in any
-browser, no install needed. You patch gates together and hear the circuit:
+browser, no install needed. You build circuits by dragging wires between gates (or in a plain list view)
+and hear the circuit as you go:
 
 - each possible measurement outcome is a note (G major pentatonic);
 - oscillator amplitude = |quantum amplitude|, so loudness = probability and total loudness never changes;
 - phase, which measurement can't see, becomes color and stereo position, so you can watch and hear interference;
+- the wire editor enforces the physics as you patch: plugging one output into two gates is refused
+  (no-cloning), and so is wiring a loop;
 - **Real** mode plays what IBM's machine actually measured, including the noise, and Measure mode
   replays the machine's shots in the order they came out.
 
@@ -120,7 +123,6 @@ A full run uses a few seconds of the Open Plan's 10 free minutes per 28 days.
 Cascade is an experiment in what a quantum language should feel like to write: graph-shaped,
 live, and strict about physics at compile time. Next up:
 
-- a drag-and-wire editor in Cascade Listen
 - automatic uncomputation (cleaning up temporary qubits), which fits a graph model naturally
 - export to HUGR, the graph-based format behind Quantinuum's Guppy, alongside OpenQASM 3
 
