@@ -1,0 +1,7 @@
+ibm_key.txt
+*.rtf
+.venv/
+__pycache__/
+.pytest_cache/
+results/last_*.log
+.DS_Store

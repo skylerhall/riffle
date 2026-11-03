@@ -1,0 +1,838 @@
+<title>Cascade Listen</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: an instrument panel. Patch list (the cascade graph) on the left, scope (circuit + spectrum) on the right, export below. */
+:root{
+  --bg:#eceef4; --panel:#f9fafc; --fg:#161b2c; --muted:#5a6278; --line:#d2d6e2; --track:#e1e4ec;
+  --accent:#3b4dcc; --accent-fg:#ffffff; --wire:#8e95aa;
+  --ok:#1b7c53; --warn:#9c6410; --err:#b5372f; --err-bg:#f8e3e1; --warn-bg:#f6ecd9;
+  --bar-l:52%; --real:#3a4160;
+  --f-display:"Unbounded","Figtree",system-ui,sans-serif;
+  --f-body:"Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1222; --panel:#151a2d; --fg:#e5e8f2; --muted:#929ab0; --line:#283050; --track:#1f2640;
+    --accent:#8e9cff; --accent-fg:#0e1222; --wire:#5d6585;
+    --ok:#5fd19d; --warn:#e9b25a; --err:#ff8a80; --err-bg:#3a1d22; --warn-bg:#36291a;
+    --bar-l:62%; --real:#cfd4e4; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1222; --panel:#151a2d; --fg:#e5e8f2; --muted:#929ab0; --line:#283050; --track:#1f2640;
+  --accent:#8e9cff; --accent-fg:#0e1222; --wire:#5d6585;
+  --ok:#5fd19d; --warn:#e9b25a; --err:#ff8a80; --err-bg:#3a1d22; --warn-bg:#36291a;
+  --bar-l:62%; --real:#cfd4e4; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5}
+.wrap{max-width:1200px;margin:0 auto;padding-block:22px 56px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:20px}
+button,select,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* header */
+header{display:flex;flex-wrap:wrap;gap:16px 28px;align-items:flex-end;justify-content:space-between}
+.brand{min-width:0;max-width:62ch}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(1.5rem,3.2vw,2.1rem);letter-spacing:-.01em;margin:0 0 6px;text-wrap:balance}
+h1 span{color:var(--accent)}
+.lede{margin:0;color:var(--muted)}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:7px 12px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--wire)}
+.btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.seg button{border:0;background:transparent;padding:7px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--fg);color:var(--bg)}
+.field{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.field select{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 8px;color:var(--fg)}
+input[type=range]{accent-color:var(--accent)}
+
+/* main grid */
+main{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:20px;align-items:start}
+@media (max-width:900px){main{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;display:flex;flex-direction:column;gap:14px}
+.ph{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:600;margin:0;color:var(--muted)}
+.note{font-size:13px;color:var(--muted);margin:0}
+
+/* status */
+.status{display:flex;gap:10px;align-items:flex-start;font-size:14px;padding:9px 12px;border-radius:8px;background:var(--track)}
+.status .pill{font-family:var(--f-mono);font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:99px;border:1px solid currentColor;flex:none;margin-top:1px}
+.status.ok .pill{color:var(--ok)}
+.status.wait{background:var(--warn-bg)} .status.wait .pill{color:var(--warn)}
+.status.err,.status.clone{background:var(--err-bg)} .status.err .pill,.status.clone .pill{color:var(--err)}
+
+/* patch rows */
+#patch{display:flex;flex-direction:column;gap:8px}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.row.bad{border-color:var(--err);box-shadow:inset 3px 0 0 var(--err)}
+.row.waiting{border-color:var(--warn);box-shadow:inset 3px 0 0 var(--warn)}
+.row input.name{width:6.5rem;font-family:var(--f-mono);font-size:13px;font-weight:600;background:transparent;border:1px solid transparent;border-radius:6px;padding:4px 6px}
+.row input.name:hover,.row input.name:focus{border-color:var(--line);background:var(--panel)}
+.eq{color:var(--muted);font-family:var(--f-mono)}
+.row select{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font-family:var(--f-mono);font-size:13px;max-width:100%}
+.row select.gate{font-weight:600}
+.ins{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+.in{display:flex;align-items:center;gap:4px;min-width:0}
+.in small{font-size:11px;color:var(--muted)}
+.theta{display:flex;align-items:center;gap:6px;flex:1 1 220px;min-width:0}
+.theta input{flex:1;min-width:80px}
+.theta output{font-family:var(--f-mono);font-size:12px;width:4.2em;text-align:right;font-variant-numeric:tabular-nums}
+.sweep{font-size:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:var(--panel);cursor:pointer}
+.sweep[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.del{margin-left:auto;border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;padding:2px 6px;border-radius:6px}
+.del:hover{color:var(--err);background:var(--err-bg)}
+.add{align-self:flex-start}
+
+/* diagram */
+.diagram{overflow-x:auto;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+.diagram svg{display:block}
+.d-wire{stroke:var(--wire);stroke-width:1.5}
+.d-link{stroke:var(--fg);stroke-width:1.5}
+.d-box{fill:var(--panel);stroke:var(--fg);stroke-width:1.3}
+.d-dot{fill:var(--fg)}
+.d-plus{fill:var(--panel);stroke:var(--fg);stroke-width:1.5}
+.d-txt{fill:var(--fg);font-family:var(--f-mono);font-size:11px;font-weight:600}
+.d-lbl{fill:var(--muted);font-family:var(--f-mono);font-size:12px}
+.stale .diagram,.stale .spectrum{opacity:.45}
+
+/* spectrum */
+.spectrum{overflow-x:auto}
+.cols{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(46px,1fr);gap:6px;min-width:min-content}
+.col{display:flex;flex-direction:column;align-items:center;gap:3px;font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.pct{font-size:12px;font-weight:600}
+.tube{width:100%;height:170px;background:var(--track);border-radius:6px;position:relative;overflow:hidden}
+.bar{position:absolute;left:0;right:0;bottom:0;border-radius:6px 6px 0 0;transition:height .12s linear,background-color .12s linear}
+.col.hit .tube{outline:2px solid var(--fg);outline-offset:1px}
+.ket{font-size:12px}
+.nt,.ph-v,.shots{font-size:11px;color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;font-size:13px;color:var(--muted)}
+.wheel{width:28px;height:28px;border-radius:50%;flex:none}
+.legend > div{display:flex;align-items:center;gap:8px;min-width:0}
+.swatch{width:14px;height:14px;border-radius:3px;background:var(--real);flex:none}
+.tube.dual .bar{right:42%}
+.rbar{position:absolute;right:0;width:38%;bottom:0;border-radius:6px 6px 0 0;background:var(--real);transition:height .12s linear}
+.spectrum.hear-real .bar{opacity:.4}
+.spectrum:not(.hear-real) .rbar{opacity:.55}
+.rp{font-size:11px;color:var(--fg);min-height:1.2em}
+.real{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:10px}
+.run-pick select{max-width:100%;min-width:0;flex:1}
+.run-pick{flex-wrap:wrap}
+#load-label{font-size:14px}
+#src-real:disabled{opacity:.45;cursor:not-allowed}
+
+/* export */
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tabs button{border:1px solid var(--line);background:transparent;border-radius:7px;padding:4px 10px;cursor:pointer;font-size:13px}
+.tabs button[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+pre{margin:0;overflow-x:auto;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:12px 14px;font-family:var(--f-mono);font-size:12.5px;line-height:1.55}
+@media (prefers-reduced-motion: reduce){.bar{transition:none}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>Cascade <span>Listen</span></h1>
+      <p class="lede">Patch quantum gates together in any order. Every change cascades through the circuit instantly, and you hear the result: each possible outcome is a note, its probability sets how loud it plays, and its phase sets its color and where it sits from left to right.</p>
+    </div>
+    <div class="controls">
+      <button class="btn primary" id="sound" type="button">Turn sound on</button>
+      <div class="seg" role="group" aria-label="Listening mode">
+        <button type="button" id="mode-chord" aria-pressed="true" title="Every outcome plays at once, loudness = probability">Chord</button>
+        <button type="button" id="mode-measure" aria-pressed="false" title="Measure the circuit over and over, one note per measurement">Measure</button>
+      </div>
+      <label class="field" for="vol">Vol <input type="range" id="vol" min="0" max="1" step="0.01" value="0.6"></label>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="panel" aria-labelledby="patch-h">
+      <div class="ph">
+        <h2 id="patch-h">Patch</h2>
+        <div class="controls">
+          <label class="field" for="preset">Preset
+            <select id="preset"></select>
+          </label>
+          <label class="field" for="qubits">Qubits
+            <select id="qubits"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+          </label>
+        </div>
+      </div>
+      <div class="status" id="status" role="status"><span class="pill">Live</span><span id="status-msg"></span></div>
+      <div id="patch"></div>
+      <button class="btn add" id="add" type="button">+ Add gate</button>
+      <p class="note">Each gate names the wires it takes in. <code>q0</code>, <code>q1</code>… are the starting qubits; a gate's name is its output (<code>name.0</code>, <code>name.1</code> for two-qubit gates). Order in this list doesn't matter. A wire can feed only one gate, because quantum states can't be copied.</p>
+    </section>
+
+    <section class="panel" id="scope" aria-labelledby="scope-h">
+      <div class="ph"><h2 id="scope-h">Circuit</h2><span class="note">Laid out automatically from the patch</span></div>
+      <div class="diagram" id="diagram"></div>
+      <div class="ph"><h2>Spectrum</h2><span class="note" id="spec-note">All outcomes play together. Total loudness never changes; probability only moves between notes.</span></div>
+      <div class="spectrum"><div class="cols" id="cols"></div></div>
+      <div class="legend">
+        <div><span class="wheel" id="wheel" aria-hidden="true"></span><span>Color = phase. Blue is +, orange is −. Phase can't be measured directly, but it decides which outcomes cancel.</span></div>
+        <div><span>Pan = phase too: + sits right, − sits left.</span></div>
+        <div id="real-key" hidden><span class="swatch" aria-hidden="true"></span><span>Right-hand bar = what the machine actually measured.</span></div>
+      </div>
+      <div class="real">
+        <div class="ph">
+          <h2>Real machine</h2>
+          <div class="controls">
+            <div class="seg" role="group" aria-label="Which results to hear">
+              <button type="button" id="src-ideal" aria-pressed="true">Ideal</button>
+              <button type="button" id="src-real" aria-pressed="false">Real</button>
+            </div>
+            <label class="btn" for="load" tabindex="0" id="load-label">Load results<input type="file" id="load" accept=".json,application/json" hidden></label>
+          </div>
+        </div>
+        <label class="field run-pick" for="runs">Run <select id="runs"></select></label>
+        <p class="note" id="real-note"></p>
+      </div>
+    </section>
+  </main>
+
+  <section class="panel" aria-labelledby="exp-h">
+    <div class="ph">
+      <h2 id="exp-h">Export</h2>
+      <div class="tabs" role="group" aria-label="Export format">
+        <button type="button" id="tab-qasm" aria-pressed="true">OpenQASM 3</button>
+        <button type="button" id="tab-py" aria-pressed="false">cascade.py</button>
+        <button type="button" id="tab-patch" aria-pressed="false">Patch file</button>
+        <button type="button" id="copy" class="btn">Copy</button>
+      </div>
+    </div>
+    <pre id="code" tabindex="0"></pre>
+    <p class="note">OpenQASM 3 runs on IBM Quantum and most other hardware and simulators. The cascade.py version runs with the Python prototype. To run your own patch on IBM's machine, save the patch file as <code>my_patch.json</code> in the cascade folder and run <code>python run_ibm.py --patch my_patch.json</code>.</p>
+  </section>
+</div>
+
+<script>
+const PI = Math.PI;
+const $ = s => document.querySelector(s);
+
+/* ---------------- gates ---------------- */
+const GATE_INFO = {
+  H:{k:1}, X:{k:1}, Y:{k:1}, Z:{k:1}, S:{k:1}, T:{k:1},
+  RX:{k:1,rot:true}, RY:{k:1,rot:true}, RZ:{k:1,rot:true},
+  CX:{k:2,labels:['ctrl','target']}, CZ:{k:2,labels:['a','b']}, SWAP:{k:2,labels:['a','b']},
+  CCX:{k:3,labels:['ctrl','ctrl','target']}
+};
+const GATE_TITLE = {
+  H:'Hadamard: split into an even superposition', X:'NOT: flip 0 and 1', Y:'Y: flip with a phase', Z:'Phase flip: negate the 1 part',
+  S:'Quarter-turn phase', T:'Eighth-turn phase', RX:'Rotate around X by θ', RY:'Rotate around Y by θ', RZ:'Rotate the phase by θ',
+  CX:'Controlled NOT: entangles two qubits', CZ:'Controlled phase flip', SWAP:'Swap two qubits', CCX:'Toffoli: NOT controlled by two qubits'
+};
+const GATES = Object.keys(GATE_INFO);
+
+function eye(d){ return Array.from({length:d},(_,i)=>Array.from({length:d},(_,j)=>i===j?[1,0]:[0,0])); }
+function ctrl(U){ const d=U.length, M=eye(2*d); for(let i=0;i<d;i++) for(let j=0;j<d;j++) M[d+i][d+j]=U[i][j]; return M; }
+const MX=[[[0,0],[1,0]],[[1,0],[0,0]]], MZ=[[[1,0],[0,0]],[[0,0],[-1,0]]];
+function matrixFor(g, thetaPi){
+  const s=Math.SQRT1_2, th=(thetaPi||0)*PI, c=Math.cos(th/2), sn=Math.sin(th/2);
+  switch(g){
+    case 'H': return [[[s,0],[s,0]],[[s,0],[-s,0]]];
+    case 'X': return MX;
+    case 'Y': return [[[0,0],[0,-1]],[[0,1],[0,0]]];
+    case 'Z': return MZ;
+    case 'S': return [[[1,0],[0,0]],[[0,0],[0,1]]];
+    case 'T': return [[[1,0],[0,0]],[[0,0],[s,s]]];
+    case 'RX': return [[[c,0],[0,-sn]],[[0,-sn],[c,0]]];
+    case 'RY': return [[[c,0],[-sn,0]],[[sn,0],[c,0]]];
+    case 'RZ': return [[[Math.cos(th/2),-Math.sin(th/2)],[0,0]],[[0,0],[Math.cos(th/2),Math.sin(th/2)]]];
+    case 'CX': return ctrl(MX);
+    case 'CZ': return ctrl(MZ);
+    case 'CCX': return ctrl(ctrl(MX));
+    case 'SWAP': { const M=eye(4); [M[1],M[2]]=[M[2],M[1]]; return M; }
+  }
+}
+
+/* ---------------- refs ---------------- */
+const QRE=/^q(\d+)$/, NAMERE=/^[A-Za-z_]\w*$/;
+function parseRef(ref){
+  const m=QRE.exec(ref); if(m) return {src:ref,i:0,qubit:+m[1]};
+  const dot=ref.indexOf('.'); if(dot<0) return {src:ref,i:0};
+  return {src:ref.slice(0,dot), i:+ref.slice(dot+1)};
+}
+const norm = r => { const p=parseRef(r); return p.src+'.'+p.i; };
+
+/* ---------------- compile (same rules as cascade.py) ---------------- */
+function fail(kind,msg,nodes){ return {ok:false,kind,msg,nodes}; }
+function compile(st){
+  const {n,nodes}=st, by=new Map(nodes.map(x=>[x.name,x]));
+  const missing=[], consumers=new Map(), deps=new Map();
+  for(const node of nodes){
+    const d=new Set(); deps.set(node.name,d);
+    for(const ref of node.inputs){
+      if(!ref) return fail('err',`Choose every input for ${node.name}.`,[node.name]);
+      const p=parseRef(ref);
+      if(p.qubit!==undefined){
+        if(p.qubit>=n) return fail('err',`${node.name} reads ${ref}, but this patch has ${n} qubit${n>1?'s':''}. Add a qubit or pick another wire.`,[node.name]);
+      } else {
+        const src=by.get(p.src);
+        if(!src){ if(!missing.includes(p.src)) missing.push(p.src); continue; }
+        if(p.i>=GATE_INFO[src.gate].k) return fail('err',`${src.name} has no output .${p.i}.`,[node.name]);
+        d.add(p.src);
+      }
+      const key=norm(ref);
+      if(consumers.has(key)){
+        const other=consumers.get(key);
+        return fail('clone',`${ref} feeds both ${other} and ${node.name}. A qubit's state can't be copied, so each wire can feed only one gate.`,[other,node.name]);
+      }
+      consumers.set(key,node.name);
+    }
+  }
+  if(missing.length) return fail('wait',`Waiting on ${missing.join(', ')}. The circuit runs as soon as ${missing.length>1?'they exist':'it exists'}.`,
+    nodes.filter(x=>x.inputs.some(r=>r&&missing.includes(parseRef(r).src))).map(x=>x.name));
+  const order=[], rem=new Map([...deps].map(([k,v])=>[k,new Set(v)]));
+  const ready=nodes.filter(x=>!deps.get(x.name).size).map(x=>x.name);
+  while(ready.length){
+    const m=ready.shift(); order.push(m);
+    for(const x of nodes){ const r=rem.get(x.name); if(r.has(m)){ r.delete(m); if(!r.size) ready.push(x.name); } }
+  }
+  if(order.length!==nodes.length){
+    const stuck=nodes.filter(x=>!order.includes(x.name)).map(x=>x.name);
+    return fail('err',`Loop between ${stuck.join(', ')}. A gate can't feed something that feeds it.`,stuck);
+  }
+  const qof=new Map(); for(let q=0;q<n;q++) qof.set(`q${q}.0`,q);
+  const steps=[];
+  for(const name of order){
+    const node=by.get(name), qs=node.inputs.map(r=>qof.get(norm(r)));
+    if(new Set(qs).size!==qs.length) return fail('err',`${name} touches the same qubit twice. Its inputs must come from different qubit lines.`,[name]);
+    qs.forEach((q,i)=>qof.set(`${name}.${i}`,q));
+    steps.push({name,gate:node.gate,qs,theta:node.theta});
+  }
+  return {ok:true,steps};
+}
+
+/* ---------------- simulate ---------------- */
+function simulate(n,steps){
+  const N=1<<n, re=new Float64Array(N), im=new Float64Array(N); re[0]=1;
+  for(const st of steps){
+    const U=matrixFor(st.gate,st.theta), k=st.qs.length, K=1<<k;
+    const masks=st.qs.map(q=>1<<(n-1-q)), all=masks.reduce((a,b)=>a|b,0);
+    const idx=new Array(K), ar=new Float64Array(K), ai=new Float64Array(K);
+    for(let base=0;base<N;base++){
+      if(base&all) continue;
+      for(let l=0;l<K;l++){ let x=base; for(let j=0;j<k;j++) if((l>>(k-1-j))&1) x|=masks[j]; idx[l]=x; ar[l]=re[x]; ai[l]=im[x]; }
+      for(let r=0;r<K;r++){
+        let sr=0,si=0; const row=U[r];
+        for(let c=0;c<K;c++){ const u=row[c]; sr+=u[0]*ar[c]-u[1]*ai[c]; si+=u[0]*ai[c]+u[1]*ar[c]; }
+        re[idx[r]]=sr; im[idx[r]]=si;
+      }
+    }
+  }
+  // global phase is physically meaningless: rotate so the first outcome present is real and positive
+  let ref=-1; for(let i=0;i<N;i++) if(re[i]*re[i]+im[i]*im[i]>1e-6){ ref=i; break; }
+  const probs=[], phases=[];
+  const g = ref<0 ? 0 : Math.atan2(im[ref],re[ref]);
+  for(let i=0;i<N;i++){
+    const p=re[i]*re[i]+im[i]*im[i];
+    probs.push(p<1e-12?0:p);
+    let ph=Math.atan2(im[i],re[i])-g; ph=((ph%(2*PI))+2*PI)%(2*PI);
+    phases.push(ph);
+  }
+  return {probs,phases};
+}
+
+/* ---------------- state ---------------- */
+let uid=0;
+const N_ = (name,gate,inputs,theta) => ({id:++uid,name,gate,inputs,theta:theta??0.5,sweep:false});
+const PRESETS = {
+  dial:{label:'Interference dial', n:1, nodes:()=>[N_('a','H',['q0']),N_('dial','RZ',['a'],0.5),N_('out','H',['dial'])]},
+  bell:{label:'Bell pair (written backwards)', n:2, nodes:()=>[N_('entangle','CX',['spread','q1']),N_('spread','H',['q0'])]},
+  grover:{label:'Grover search', n:2, nodes:()=>[
+    N_('s0','H',['q0']),N_('s1','H',['q1']),N_('oracle','CZ',['s0','s1']),
+    N_('h0','H',['oracle.0']),N_('h1','H',['oracle.1']),N_('x0','X',['h0']),N_('x1','X',['h1']),
+    N_('mirror','CZ',['x0','x1']),N_('u0','X',['mirror.0']),N_('u1','X',['mirror.1']),N_('out0','H',['u0']),N_('out1','H',['u1'])]},
+  ghz:{label:'GHZ chord', n:3, nodes:()=>[N_('s','H',['q0']),N_('link1','CX',['s','q1']),N_('link2','CX',['link1.0','q2'])]},
+  rainbow:{label:'Phase rainbow', n:3, nodes:()=>[
+    N_('h0','H',['q0']),N_('h1','H',['q1']),N_('h2','H',['q2']),N_('p0','S',['h0']),N_('p1','T',['h1']),N_('p2','RZ',['h2'],0.25)]},
+};
+let state={n:1,nodes:[]};
+let lastGood=null, current=null;
+
+function loadPreset(key){
+  const p=PRESETS[key]; state={n:p.n,nodes:p.nodes()};
+  $('#qubits').value=String(p.n); $('#preset').value=key; shots=[];
+  update(true);
+}
+
+/* ---------------- helpers for editing ---------------- */
+function consumerMap(){
+  const m=new Map();
+  for(const x of state.nodes) for(const r of x.inputs){ if(!r) continue; const k=norm(r); if(!m.has(k)) m.set(k,[]); m.get(k).push(x.name); }
+  return m;
+}
+function outputsOf(node){ const k=GATE_INFO[node.gate].k; return k===1?[node.name]:Array.from({length:k},(_,i)=>`${node.name}.${i}`); }
+function candidates(selfName){
+  const c=[]; for(let q=0;q<state.n;q++) c.push(`q${q}`);
+  for(const x of state.nodes) if(x.name!==selfName) c.push(...outputsOf(x));
+  return c;
+}
+function descendants(name){
+  const set=new Set([name]); let grew=true;
+  while(grew){ grew=false;
+    for(const x of state.nodes) if(!set.has(x.name) && x.inputs.some(r=>r&&set.has(parseRef(r).src))){ set.add(x.name); grew=true; } }
+  return set;
+}
+function freeWires(selfName){
+  const used=consumerMap(), banned=selfName?descendants(selfName):new Set();
+  const out=[];
+  for(const x of [...state.nodes].reverse()) if(!banned.has(x.name)) for(const o of outputsOf(x)) if(!used.has(norm(o))) out.push(o);
+  for(let q=0;q<state.n;q++){ const o=`q${q}`; if(!used.has(norm(o))) out.push(o); }
+  return out;
+}
+function uniqueName(base){ let i=1, nm=base+i; const names=new Set(state.nodes.map(x=>x.name)); while(names.has(nm)) nm=base+(++i); return nm; }
+function fillInputs(node,k){
+  const keep=node.inputs.slice(0,k);
+  const pool=freeWires(node.name).filter(w=>!keep.includes(w));
+  while(keep.length<k) keep.push(pool.shift()||'');
+  node.inputs=keep;
+}
+
+/* ---------------- editor ---------------- */
+function el(tag,attrs={},kids=[]){
+  const e=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs)){ if(v===undefined||v===null||v===false) continue; if(k==='text') e.textContent=v; else e.setAttribute(k,v===true?'':v); }
+  for(const kid of [].concat(kids)) if(kid) e.append(kid);
+  return e;
+}
+const fmtPi = t => `${(+t).toFixed(2)}π`;
+
+function renderEditor(){
+  const list=$('#patch'); list.innerHTML='';
+  const cons=consumerMap();
+  for(const node of state.nodes){
+    const info=GATE_INFO[node.gate];
+    const gateSel=el('select',{class:'gate',id:`gate-${node.id}`,'data-id':node.id,'aria-label':`Gate for ${node.name}`,title:GATE_TITLE[node.gate]},
+      GATES.map(g=>el('option',{value:g,selected:g===node.gate,text:g})));
+    const ins=el('div',{class:'ins'});
+    const cands=candidates(node.name);
+    node.inputs.forEach((ref,j)=>{
+      const sel=el('select',{class:'in',id:`in-${node.id}-${j}`,'data-id':node.id,'data-j':j,'aria-label':`${node.name} input ${j+1}`});
+      sel.append(el('option',{value:'',text:'choose…',selected:!ref}));
+      const list=cands.includes(ref)||!ref?cands:[...cands,ref];
+      for(const c of list){
+        const others=(cons.get(norm(c))||[]).filter(nm=>nm!==node.name);
+        const missing=!cands.includes(c);
+        sel.append(el('option',{value:c,selected:c===ref,text:c+(missing?'  (missing)':others.length?`  · feeds ${others.join(', ')}`:'')}));
+      }
+      const wrapIn=el('label',{class:'in'},[info.labels?el('small',{text:info.labels[j]}):null, sel]);
+      ins.append(wrapIn);
+    });
+    const kids=[
+      el('input',{class:'name',id:`name-${node.id}`,'data-id':node.id,value:node.name,'aria-label':'Gate name',spellcheck:'false',autocomplete:'off'}),
+      el('span',{class:'eq','aria-hidden':'true',text:'='}),
+      gateSel, ins
+    ];
+    if(info.rot){
+      kids.push(el('div',{class:'theta'},[
+        el('input',{type:'range',class:'th',id:`th-${node.id}`,'data-id':node.id,min:0,max:2,step:0.01,value:node.theta,'aria-label':`θ for ${node.name}`}),
+        el('output',{id:`thv-${node.id}`,text:fmtPi(node.theta)}),
+        el('button',{type:'button',class:'sweep','data-id':node.id,'aria-pressed':String(!!node.sweep),title:'Slowly turn θ through a full circle',text:'Sweep'})
+      ]));
+    }
+    kids.push(el('button',{type:'button',class:'del','data-id':node.id,'aria-label':`Remove ${node.name}`,title:'Remove (its wires reconnect around it)',text:'×'}));
+    list.append(el('div',{class:'row',id:`row-${node.id}`,'data-id':node.id},kids));
+  }
+}
+function markRows(res){
+  for(const node of state.nodes){
+    const row=document.getElementById(`row-${node.id}`); if(!row) continue;
+    const hit=!res.ok && res.nodes.includes(node.name);
+    row.classList.toggle('bad',hit && res.kind!=='wait');
+    row.classList.toggle('waiting',hit && res.kind==='wait');
+  }
+}
+const byId = id => state.nodes.find(x=>x.id===+id);
+
+$('#patch').addEventListener('change',e=>{
+  const t=e.target, node=byId(t.dataset.id); if(!node) return;
+  if(t.classList.contains('gate')){
+    const was=node.gate; node.gate=t.value;
+    if(GATE_INFO[was].k!==GATE_INFO[node.gate].k) fillInputs(node,GATE_INFO[node.gate].k);
+    if(!GATE_INFO[node.gate].rot) node.sweep=false;
+    // outputs beyond the new arity disappear; consumers of them will report the problem
+    update(true);
+  } else if(t.classList.contains('in')){
+    node.inputs[+t.dataset.j]=t.value; update(true);
+  } else if(t.classList.contains('name')){
+    rename(node,t.value.trim(),t);
+  }
+});
+$('#patch').addEventListener('input',e=>{
+  const t=e.target; if(!t.classList.contains('th')) return;
+  const node=byId(t.dataset.id); node.theta=+t.value;
+  document.getElementById(`thv-${node.id}`).textContent=fmtPi(node.theta);
+  update(false);
+});
+$('#patch').addEventListener('keydown',e=>{ if(e.target.classList.contains('name') && e.key==='Enter') e.target.blur(); });
+$('#patch').addEventListener('click',e=>{
+  const t=e.target.closest('button'); if(!t) return; const node=byId(t.dataset.id); if(!node) return;
+  if(t.classList.contains('sweep')){ node.sweep=!node.sweep; t.setAttribute('aria-pressed',String(node.sweep)); if(node.sweep) ensureSweep(); }
+  else if(t.classList.contains('del')){ removeNode(node); }
+});
+
+function rename(node,nm,input){
+  if(nm===node.name) return;
+  let problem='';
+  if(!NAMERE.test(nm)) problem='Names use letters, digits and _ and start with a letter.';
+  else if(QRE.test(nm)) problem='q0, q1… are reserved for the starting qubits.';
+  else if(state.nodes.some(x=>x!==node && x.name===nm)) problem=`${nm} is already taken.`;
+  if(problem){ input.value=node.name; showStatus({ok:false,kind:'err',msg:problem}); setTimeout(()=>showStatus(current),2600); return; }
+  const old=node.name; node.name=nm;
+  for(const x of state.nodes) x.inputs=x.inputs.map(r=>{ if(!r) return r; const p=parseRef(r); if(p.src!==old) return r; return r.includes('.')?`${nm}.${p.i}`:nm; });
+  update(true);
+}
+function removeNode(node){
+  // splice it out like pulling a pedal from a chain: whatever read its outputs now reads its inputs
+  const outs=outputsOf(node).map(norm);
+  for(const x of state.nodes) if(x!==node) x.inputs=x.inputs.map(r=>{ if(!r) return r; const i=outs.indexOf(norm(r)); return i<0?r:(node.inputs[i]||''); });
+  state.nodes=state.nodes.filter(x=>x!==node);
+  update(true);
+}
+$('#add').addEventListener('click',()=>{
+  const node=N_(uniqueName('g'),'H',[]); state.nodes.push(node); fillInputs(node,1); update(true);
+  const nm=document.getElementById(`name-${node.id}`); if(nm) nm.focus();
+});
+
+/* ---------------- status ---------------- */
+function showStatus(res){
+  const box=$('#status'), msg=$('#status-msg'), pill=box.querySelector('.pill');
+  box.className='status '+(res.ok?'ok':res.kind);
+  pill.textContent=res.ok?'Live':res.kind==='wait'?'Waiting':res.kind==='clone'?'No-cloning':'Fix';
+  msg.textContent=res.ok?`${state.nodes.length} gate${state.nodes.length===1?'':'s'} on ${state.n} qubit${state.n>1?'s':''}. Change anything and it cascades through.`:res.msg;
+}
+
+/* ---------------- diagram ---------------- */
+const SYM={CX:['ctrl','plus'],CZ:['ctrl','ctrl'],CCX:['ctrl','ctrl','plus'],SWAP:['x','x']};
+function renderDiagram(steps){
+  const n=state.n, colW=46, x0=58, top=24, rowH=44;
+  const last=Array(n).fill(-1), placed=[];
+  for(const s of steps){
+    const lo=Math.min(...s.qs), hi=Math.max(...s.qs);
+    let col=0; for(let q=lo;q<=hi;q++) col=Math.max(col,last[q]+1);
+    for(let q=lo;q<=hi;q++) last[q]=col;
+    placed.push({...s,col,lo,hi});
+  }
+  const cols=Math.max(0,...last.map(c=>c+1));
+  const W=Math.max(x0+cols*colW+30,260), H=top*2+(n-1)*rowH;
+  const y=q=>top+q*rowH, x=c=>x0+c*colW+colW/2;
+  let svg=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Circuit diagram">`;
+  for(let q=0;q<n;q++) svg+=`<text class="d-lbl" x="8" y="${y(q)+4}">q${q}</text><line class="d-wire" x1="36" y1="${y(q)}" x2="${W-10}" y2="${y(q)}"/>`;
+  for(const p of placed){
+    const cx=x(p.col);
+    const tip=`<title>${p.name} = ${p.gate}${GATE_INFO[p.gate].rot?'('+fmtPi(p.theta)+')':''}</title>`;
+    if(SYM[p.gate]){
+      svg+=`<g>${tip}<line class="d-link" x1="${cx}" y1="${y(p.lo)}" x2="${cx}" y2="${y(p.hi)}"/>`;
+      SYM[p.gate].forEach((m,j)=>{ const yy=y(p.qs[j]);
+        if(m==='ctrl') svg+=`<circle class="d-dot" cx="${cx}" cy="${yy}" r="4.5"/>`;
+        else if(m==='plus') svg+=`<circle class="d-plus" cx="${cx}" cy="${yy}" r="10"/><line class="d-link" x1="${cx-10}" y1="${yy}" x2="${cx+10}" y2="${yy}"/><line class="d-link" x1="${cx}" y1="${yy-10}" x2="${cx}" y2="${yy+10}"/>`;
+        else svg+=`<line class="d-link" x1="${cx-6}" y1="${yy-6}" x2="${cx+6}" y2="${yy+6}"/><line class="d-link" x1="${cx-6}" y1="${yy+6}" x2="${cx+6}" y2="${yy-6}"/>`;
+      });
+      svg+='</g>';
+    } else {
+      const yy=y(p.qs[0]), w=p.gate.length>1?34:28;
+      svg+=`<g>${tip}<rect class="d-box" x="${cx-w/2}" y="${yy-13}" width="${w}" height="26" rx="5"/><text class="d-txt" x="${cx}" y="${yy+4}" text-anchor="middle">${p.gate}</text></g>`;
+    }
+  }
+  if(!steps.length) svg+=`<text class="d-lbl" x="${x0}" y="${top-8}">no gates yet</text>`;
+  $('#diagram').innerHTML=svg+'</svg>';
+}
+
+/* ---------------- notes and color ---------------- */
+const BASE_MIDI=55, STEPS=[0,2,4,7,9]; // G major pentatonic from G3: every combination stays consonant
+const NAMES=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const midiOf=i=>BASE_MIDI+12*Math.floor(i/5)+STEPS[i%5];
+const freq=i=>440*Math.pow(2,(midiOf(i)-69)/12);
+const noteName=i=>{ const m=midiOf(i); return NAMES[m%12]+(Math.floor(m/12)-1); };
+const hueOf=ph=>(200+ph*180/PI)%360;
+const panOf=ph=>Math.cos(ph)*0.8;
+{
+  const stops=[]; for(let d=0;d<=360;d+=30) stops.push(`hsl(${(200+d)%360} 72% var(--bar-l)) ${d}deg`);
+  $('#wheel').style.background=`conic-gradient(from 90deg, ${stops.join(',')})`;
+}
+
+/* ---------------- spectrum ---------------- */
+let shots=[];
+function renderSpectrum(){
+  const n=state.n, N=1<<n, wrap=$('#cols');
+  if(wrap.children.length!==N){
+    wrap.innerHTML='';
+    for(let i=0;i<N;i++){
+      wrap.append(el('div',{class:'col',id:`col-${i}`},[
+        el('div',{class:'pct'}), el('div',{class:'tube'},[el('div',{class:'bar'})]),
+        el('div',{class:'ket',text:`|${i.toString(2).padStart(n,'0')}⟩`}), el('div',{class:'nt',text:noteName(i)}),
+        el('div',{class:'ph-v'}), el('div',{class:'shots'})
+      ]));
+    }
+  }
+  const good=lastGood&&lastGood.n===n?lastGood:null;
+  const counts=Array(N).fill(0); for(const k of shots) if(k<N) counts[k]++;
+  const measuring=mode==='measure';
+  const real=realMatch&&realMatch.r.n===n?realMatch:null;
+  wrap.parentElement.classList.toggle('hear-real',!!real&&src==='real');
+  for(let i=0;i<N;i++){
+    const c=wrap.children[i], p=good?good.probs[i]:0, ph=good?good.phases[i]:0;
+    c.querySelector('.pct').textContent=`${(p*100).toFixed(p>0&&p<0.1?1:0)}%`;
+    const tube=c.querySelector('.tube');
+    tube.classList.toggle('dual',!!real);
+    let rb=tube.querySelector('.rbar'), rp=c.querySelector('.rp');
+    if(real&&!rb){ rb=el('div',{class:'rbar'}); tube.append(rb); }
+    if(!rp){ rp=el('div',{class:'rp'}); c.querySelector('.pct').after(rp); }
+    if(rb){ const q=real?real.probs[i]:0; rb.style.height=`${q>0.0005?Math.max(q*100,1.5):0}%`; }
+    rp.textContent=real?`real ${(real.probs[i]*100).toFixed(1)}%`:'';
+    const bar=c.querySelector('.bar');
+    bar.style.height=`${p>0.0005?Math.max(p*100,1.5):0}%`;
+    bar.style.backgroundColor=`hsl(${hueOf(ph).toFixed(1)} 72% var(--bar-l))`;
+    c.querySelector('.ph-v').textContent=p>0.0005?`φ ${(ph/PI).toFixed(2)}π`:'—';
+    c.querySelector('.shots').textContent=measuring?`${counts[i]} hit${counts[i]===1?'':'s'}`:'';
+  }
+  const hearReal=!!real&&src==='real';
+  $('#spec-note').textContent=measuring
+    ? (hearReal ? (real.r.record ? `Replaying the machine's own measurements in order, one note per shot (shot ${recIdx} of ${real.r.record.length}).` : `Drawing notes from the corrected results, one per beat.`)
+                : `Each note is one measurement. Over the last ${shots.length} shots, the notes you hear follow the bar heights.`)
+    : (hearReal ? 'Playing what the machine measured. Notes that should be silent leak in from noise.'
+                : 'All outcomes play together. Total loudness never changes; probability only moves between notes.');
+}
+
+/* ---------------- audio ---------------- */
+let ctx=null, master=null, bus=null, voices=[], audioOn=false, mode='chord', measureTimer=null;
+function initAudio(){
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  master=ctx.createGain(); master.gain.value=+$('#vol').value*0.9;
+  const comp=ctx.createDynamicsCompressor(); comp.threshold.value=-14; comp.ratio.value=4;
+  bus=ctx.createBiquadFilter(); bus.type='lowpass'; bus.frequency.value=2600;
+  // a little room: short feedback delay
+  const dly=ctx.createDelay(1), fb=ctx.createGain(), wet=ctx.createGain();
+  dly.delayTime.value=0.19; fb.gain.value=0.32; wet.gain.value=0.25;
+  bus.connect(master); bus.connect(dly); dly.connect(fb); fb.connect(dly); dly.connect(wet); wet.connect(master);
+  master.connect(comp); comp.connect(ctx.destination);
+  for(let i=0;i<16;i++){
+    const o=ctx.createOscillator(), g=ctx.createGain(), p=ctx.createStereoPanner();
+    o.type='triangle'; o.frequency.value=freq(i); g.gain.value=0;
+    o.connect(g); g.connect(p); p.connect(bus); o.start();
+    voices.push({o,g,p});
+  }
+}
+function applyAudio(){
+  if(!ctx) return;
+  const t=ctx.currentTime, good=lastGood&&lastGood.n===state.n?lastGood:null;
+  const real=src==='real'&&realMatch&&realMatch.r.n===state.n?realMatch:null;
+  for(let i=0;i<voices.length;i++){
+    const src_=real?real.probs:good?good.probs:[];
+    const p=i<src_.length?src_[i]:0, ph=!real&&good&&i<good.phases.length?good.phases[i]:PI/2;
+    // oscillator amplitude = |quantum amplitude|, so sound power = probability
+    const target=audioOn&&mode==='chord'?Math.sqrt(p)*0.26:0;
+    voices[i].g.gain.setTargetAtTime(target,t,0.05);
+    voices[i].p.pan.setTargetAtTime(panOf(ph),t,0.05);
+  }
+  const want=audioOn&&mode==='measure';
+  if(want&&!measureTimer) measureTimer=setInterval(measureTick,230);
+  if(!want&&measureTimer){ clearInterval(measureTimer); measureTimer=null; }
+}
+function pluck(i,ph){
+  const t=ctx.currentTime, o=ctx.createOscillator(), g=ctx.createGain(), p=ctx.createStereoPanner();
+  o.type='triangle'; o.frequency.value=freq(i); p.pan.value=panOf(ph);
+  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.42,t+0.01); g.gain.exponentialRampToValueAtTime(0.0008,t+0.9);
+  o.connect(g); g.connect(p); p.connect(bus); o.start(t); o.stop(t+0.95);
+}
+function measureTick(){
+  if(!lastGood||lastGood.n!==state.n) return;
+  let k;
+  if(src==='real'&&realMatch&&realMatch.r.n===state.n&&!realMatch.r.record){
+    const pr=realMatch.probs; let r=Math.random(); k=0;
+    for(;k<pr.length;k++){ r-=pr[k]; if(r<0) break; }
+    k=Math.min(k,pr.length-1); pluck(k,PI/2);
+  } else if(src==='real'&&realMatch&&realMatch.r.n===state.n){
+    const rec=realMatch.r.record; k=parseInt(rec[recIdx%rec.length],2); recIdx=(recIdx+1)%rec.length;
+    pluck(k,PI/2);  // phase is invisible to measurement: center
+  } else {
+    const pr=lastGood.probs; let r=Math.random(); k=0;
+    for(;k<pr.length;k++){ r-=pr[k]; if(r<0) break; }
+    k=Math.min(k,pr.length-1);
+    pluck(k,lastGood.phases[k]);
+  }
+  shots.push(k); if(shots.length>48) shots.shift();
+  renderSpectrum();
+  const c=document.getElementById(`col-${k}`); if(c){ c.classList.add('hit'); setTimeout(()=>c.classList.remove('hit'),160); }
+}
+$('#sound').addEventListener('click',async()=>{
+  if(!ctx) initAudio();
+  audioOn=!audioOn;
+  if(audioOn&&ctx.state==='suspended') await ctx.resume();
+  $('#sound').textContent=audioOn?'Turn sound off':'Turn sound on';
+  applyAudio();
+});
+function setMode(m){
+  mode=m; shots=[]; recIdx=0;
+  $('#mode-chord').setAttribute('aria-pressed',String(m==='chord'));
+  $('#mode-measure').setAttribute('aria-pressed',String(m==='measure'));
+  renderSpectrum(); applyAudio();
+}
+$('#mode-chord').addEventListener('click',()=>setMode('chord'));
+$('#mode-measure').addEventListener('click',()=>setMode('measure'));
+$('#vol').addEventListener('input',e=>{ if(master) master.gain.setTargetAtTime(+e.target.value*0.9,ctx.currentTime,0.03); });
+
+/* ---------------- sweep ---------------- */
+let sweepRAF=null, lastT=0;
+function sweepLoop(t){
+  const dt=lastT?Math.min(0.05,(t-lastT)/1000):0; lastT=t;
+  let any=false;
+  for(const node of state.nodes) if(node.sweep&&GATE_INFO[node.gate].rot){
+    any=true; node.theta=(node.theta+dt*0.25)%2;
+    const s=document.getElementById(`th-${node.id}`), o=document.getElementById(`thv-${node.id}`);
+    if(s) s.value=node.theta; if(o) o.textContent=fmtPi(node.theta);
+  }
+  if(any){ update(false); sweepRAF=requestAnimationFrame(sweepLoop); } else { sweepRAF=null; lastT=0; }
+}
+function ensureSweep(){ if(!sweepRAF){ lastT=0; sweepRAF=requestAnimationFrame(sweepLoop); } }
+
+/* ---------------- export ---------------- */
+let tab='qasm';
+const num=t=>String(+(+t).toFixed(4));
+function exportText(res){
+  if(!res.ok) return `// The patch has a problem, so there's nothing to export yet:\n// ${res.msg}`;
+  if(tab==='qasm'){
+    const L=['OPENQASM 3.0;','include "stdgates.inc";','',`qubit[${state.n}] q;`,`bit[${state.n}] c;`,''];
+    for(const s of res.steps){
+      const par=GATE_INFO[s.gate].rot?`(${num(s.theta)}*pi)`:'';
+      L.push(`${s.gate.toLowerCase()}${par} ${s.qs.map(q=>`q[${q}]`).join(', ')};`.padEnd(26)+`// ${s.name}`);
+    }
+    L.push('','c = measure q;'); return L.join('\n');
+  }
+  if(tab==='patch'){
+    const rows=state.nodes.map(x=>'  '+JSON.stringify(GATE_INFO[x.gate].rot?{name:x.name,gate:x.gate,inputs:x.inputs,theta:+(+x.theta).toFixed(4)}:{name:x.name,gate:x.gate,inputs:x.inputs}));
+    return `{"format": "cascade-patch/1", "label": "My patch", "n": ${state.n}, "patch": [\n${rows.join(',\n')}\n]}`;
+  }
+  const used=[...new Set(state.nodes.map(x=>x.gate))].sort();
+  const L=[];
+  if(state.nodes.some(x=>GATE_INFO[x.gate].rot)) L.push('from math import pi');
+  L.push(`from cascade import Cascade, ${used.join(', ')}`,'',`c = Cascade(${state.n}, shots=1000)`,'with c.batch():  # declared in patch order; cascade sorts it out');
+  for(const x of state.nodes){
+    const args=x.inputs.map(r=>JSON.stringify(r));
+    if(GATE_INFO[x.gate].rot) args.unshift(`${num(x.theta)} * pi`);
+    L.push(`    c[${JSON.stringify(x.name)}] = ${x.gate}(${args.join(', ')})`);
+  }
+  L.push('print(c)'); return L.join('\n');
+}
+function setTab(t){ tab=t; for(const k of ['qasm','py','patch']) $('#tab-'+k).setAttribute('aria-pressed',String(t===k)); $('#code').textContent=exportText(current); }
+$('#tab-qasm').addEventListener('click',()=>setTab('qasm'));
+$('#tab-py').addEventListener('click',()=>setTab('py'));
+$('#tab-patch').addEventListener('click',()=>setTab('patch'));
+$('#copy').addEventListener('click',()=>{
+  const txt=$('#code').textContent, btn=$('#copy');
+  const done=()=>{ btn.textContent='Copied'; setTimeout(()=>btn.textContent='Copy',1400); };
+  const fallback=()=>{ const r=document.createRange(); r.selectNodeContents($('#code')); const s=getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent='Selected, press Ctrl+C'; setTimeout(()=>btn.textContent='Copy',2200); };
+  try{ navigator.clipboard.writeText(txt).then(done,fallback); }catch(e){ fallback(); }
+});
+
+/* ---------------- real machine results ---------------- */
+// Sample: produced by run_ibm.py --fake (a noise model of ibm_kingston), NOT a real run.
+const SAMPLE = {"format":"cascade-results/1","backend":"fake_kingston (noise model)","kind":"noise-model","job_id":"3beaff4f-7f72-42e9-b6fc-034337640bf5","created":"2026-11-02T21:44:44+00:00","runs":[{"preset":"dial","label":"Interference dial","n":1,"shots":2000,"patch":[{"name":"a","gate":"H","inputs":["q0"]},{"name":"dial","gate":"RZ","inputs":["a"],"theta":0.5},{"name":"out","gate":"H","inputs":["dial"]}],"counts":{"0":1021,"1":979},"ideal":{"0":0.5,"1":0.5},"record":["0","1","0","1","1","0","0","0","0","1","0","0","1","0","1","1","0","0","0","0","1","1","0","1","1","0","0","0","0","1","0","1","1","0","0","1","0","1","1","1","0","1","0","0","1","1","1","1","1","1","1","1","0","0","1","0","0","0","1","1","1","1","1","0","0","0","0","1","1","0","1","1","1","1","1","1","1","1","1","1","0","0","1","0","0","1","1","0","1","1","1","0","1","1","1","1","1","0","0","1","1","0","0","1","0","1","0","1","0","0","0","1","0","0","0","0","0","1","0","1","0","1","1","0","1","0","1","1","0","1","0","0","0","1","0","1","1","1","1","0","0","1","0","0","0","0","0","1","0","1","1","1","0","1","0","1","0","0","0","1","0","0","1","0","0","1","0","1","1","0","1","0","1","0","0","0","1","0","1","0","0","0","0","1","0","1","0","1","0","0","0","0","1","1","0","1","0","1","1","1","0","1","0","0","0","1","0","1","1","1","0","1","1","0","1","1","0","1","0","0","0","0","0","0","1","1","0","1","0","0","1","1","0","1","1","1","1","0","0","0","0","0","0","0","1","0","0","1","1","1","0","1","1","1","0","1","0","1","1","0","0","0","0","0","0","1","0","0","0","1","0","1","0","0","1","1","1","0","0","1","1","1","1","0","1","0","0","1","1","0","1","1","0","0","0","1","0","0","1","0","0","1","0","0","0","1","0","0","0","0","0","0","0","0","0","0","1","0","0","1","1","0","0","0","0","0","1","1","0","1","0","1","0","1","0","0","1","1","1","1","1","1","0","1","1","0","1","1","1","1","1","1","0","0","0","0","0","1","1","1","0","0","1","0","1","1","1","1","1","1","1","0","0","1","0","1","1","1","1","0","1","1","0","1","0","0","1","1","1","1","0","0","1","1","1","0","1","0","0","0","1","0","1","0","0","1","1","1","0","0","0","0","0","1","1","0","0","0","0","0","1","1","0","1","0","1","1","0","1","1","0","0","0","0","0","0","0","1","0","0","1","0","1","1","1","0","0","1","0","1","1","1","1","1","1","1","1","0","0","0","0","0","0","0","0","0","0","1","0","0","1","0","0","1","1","1","0","1","0","0","0","0","1","0","1","0","0","1","1","1","1","0","1","1","1","0","0","0","0","0","1","1","1","1","0","0","1","1","1","0","0","0"],"fidelity":0.9999},{"preset":"bell","label":"Bell pair (written backwards)","n":2,"shots":2000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"counts":{"00":987,"01":18,"10":12,"11":983},"ideal":{"00":0.5,"11":0.5},"record":["11","00","00","11","11","11","11","11","11","00","00","11","10","11","11","11","11","00","00","11","00","00","11","00","00","11","00","11","00","11","00","00","00","11","00","00","00","11","00","11","00","11","00","00","00","11","00","00","11","00","00","00","00","11","11","00","11","00","00","00","11","00","11","00","00","11","00","11","00","00","11","00","00","11","00","11","00","00","00","00","11","11","00","00","00","00","00","11","11","11","11","11","11","11","00","00","11","00","00","00","00","11","11","11","11","00","00","00","00","00","00","11","11","00","11","11","11","11","11","11","01","11","11","00","00","11","11","00","00","11","11","11","00","11","11","11","00","00","00","00","00","00","00","00","00","00","00","11","00","11","00","11","11","11","00","11","00","00","11","00","11","00","11","00","11","11","00","11","00","00","11","11","11","00","00","00","11","00","00","00","11","11","11","00","11","11","00","00","11","00","00","00","00","00","00","00","11","11","00","11","11","11","11","00","11","11","11","11","11","00","11","11","00","00","00","11","00","00","00","00","11","11","11","00","00","11","11","01","11","11","11","11","00","11","00","11","00","11","00","11","00","00","00","11","00","11","11","00","11","00","00","11","00","11","00","11","11","00","11","11","00","11","11","00","00","00","11","11","11","11","00","11","11","11","11","00","00","00","11","00","11","00","11","11","11","00","11","00","00","11","11","11","00","11","11","11","11","11","00","11","00","00","00","00","11","00","00","11","11","00","11","11","11","11","11","00","00","11","00","11","11","11","00","00","00","00","11","00","00","11","11","00","00","11","00","11","00","00","11","11","00","11","11","00","00","11","11","11","00","11","11","00","00","00","11","00","00","00","11","00","00","11","00","00","00","11","00","11","00","00","00","11","00","11","00","11","00","00","00","11","11","11","11","00","11","00","11","00","11","00","11","11","00","00","00","00","11","00","11","00","00","11","00","00","11","11","11","00","11","00","11","11","11","11","00","11","00","11","11","00","00","00","11","00","11","00","11","11","00","00","11","11","00","11","11","11","11","00","00","11","00","00","00","11","00","11","11","00","11","00","11","10","00","00","11","00","00","00","00","11","11","00","11","00","11","11","01","00","00","00","00","11","11","00","11","00","00","00","11","11","00","11","00","00","00","11","11","00","00","11","11","00","11","00","01","11","00","11","11","00","00","11","11","11","11","11","00","00","11","00","11","00"],"fidelity":0.985},{"preset":"grover","label":"Grover search","n":2,"shots":2000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"counts":{"01":8,"10":19,"11":1973},"ideal":{"11":1.0},"record":["11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11"],"fidelity":0.9865},{"preset":"ghz","label":"GHZ chord","n":3,"shots":2000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"counts":{"000":999,"001":3,"010":7,"011":7,"100":11,"101":4,"110":6,"111":963},"ideal":{"000":0.5,"111":0.5},"record":["000","000","000","111","111","000","111","110","111","111","111","111","111","000","110","111","111","111","000","000","000","000","000","111","111","111","111","111","000","111","000","000","111","000","111","000","111","111","000","111","000","000","000","111","111","000","111","000","111","111","000","111","000","111","111","000","111","111","000","000","000","000","111","111","111","111","111","111","111","000","111","000","000","000","111","000","111","000","011","111","000","111","111","000","111","000","000","111","111","111","111","000","000","000","000","111","000","111","111","000","111","111","111","000","111","000","111","111","111","111","000","000","111","111","000","000","000","111","111","000","000","000","111","000","111","000","111","111","111","111","111","111","000","000","111","111","111","111","000","111","111","111","000","111","000","111","111","111","111","000","000","000","000","111","000","111","111","000","000","000","111","000","111","000","000","000","111","000","000","000","000","111","000","000","111","111","000","000","000","111","000","111","000","111","000","111","111","000","000","000","000","000","000","000","000","000","111","111","000","111","000","111","000","000","000","000","000","000","111","000","000","111","000","111","000","111","111","000","000","111","111","000","000","000","000","000","000","111","000","111","000","111","111","111","000","000","111","111","000","000","000","111","000","111","000","111","111","111","111","111","000","111","111","111","000","000","000","000","000","000","000","000","000","000","111","000","000","000","000","111","000","111","111","000","000","111","111","111","000","000","111","111","000","111","111","111","000","111","111","000","000","111","000","111","000","000","111","000","111","000","000","111","000","111","111","111","000","000","111","111","000","111","111","111","000","000","000","000","000","111","111","111","111","111","000","000","111","000","111","000","111","000","000","000","000","111","111","000","111","111","111","000","000","000","001","111","111","000","000","111","000","000","000","111","111","000","000","111","000","111","000","000","000","111","000","111","000","000","111","000","111","000","000","000","111","111","000","000","111","000","000","111","000","000","111","000","000","000","111","000","000","111","111","000","111","111","000","000","111","111","111","000","111","111","000","111","000","111","000","111","111","000","000","000","000","111","111","111","111","000","000","111","000","111","111","000","000","111","000","000","111","111","111","000","111","000","000","111","111","000","000","111","000","111","111","000","111","111","111","000","111","000","111","000","000","000","111","111","111","000","111","000","000","111","111","000","000","000","111","111","000","000","000","111","000","000","111","000","000","000","111","000","111","111","111","000","000","111","111","100","111","111","000","111","000","000","000","111","111","000","000","111","000","111","111","000","000","000","111","000","111","111"],"fidelity":0.9809},{"preset":"rainbow","label":"Phase rainbow","n":3,"shots":2000,"patch":[{"name":"h0","gate":"H","inputs":["q0"]},{"name":"h1","gate":"H","inputs":["q1"]},{"name":"h2","gate":"H","inputs":["q2"]},{"name":"p0","gate":"S","inputs":["h0"]},{"name":"p1","gate":"T","inputs":["h1"]},{"name":"p2","gate":"RZ","inputs":["h2"],"theta":0.25}],"counts":{"000":220,"001":249,"010":277,"011":259,"100":279,"101":238,"110":265,"111":213},"ideal":{"000":0.125,"001":0.125,"010":0.125,"011":0.125,"100":0.125,"101":0.125,"110":0.125,"111":0.125},"record":["011","011","100","010","011","111","010","011","101","111","110","011","110","011","010","011","111","101","001","100","010","110","111","101","010","100","001","100","110","111","001","000","010","101","000","100","101","001","001","000","001","000","101","110","111","010","110","000","011","111","011","101","100","011","111","011","010","000","111","111","011","001","010","000","101","111","000","101","011","001","001","110","100","110","100","011","000","111","101","110","011","110","111","011","110","100","010","111","011","100","101","101","111","001","101","010","011","100","110","000","001","001","100","110","110","111","001","011","110","110","110","010","010","101","011","010","010","001","101","011","001","001","100","011","101","000","010","010","100","111","000","101","000","110","111","111","010","011","010","011","101","001","010","001","100","001","100","110","011","100","001","010","100","011","101","001","101","100","101","001","111","000","010","001","001","101","111","100","100","000","100","100","011","100","011","101","100","100","010","010","010","011","011","111","010","110","011","100","100","100","111","010","010","101","010","011","111","110","011","111","011","111","100","100","111","010","110","001","010","000","011","101","011","010","101","111","111","010","001","100","000","100","101","001","011","011","100","100","001","001","110","110","000","010","110","011","011","100","001","101","101","010","110","101","010","100","110","110","101","010","100","101","001","010","110","110","011","000","001","011","111","010","011","110","111","001","100","011","100","100","000","011","110","110","111","010","111","010","111","011","100","101","111","101","101","011","100","110","101","111","110","110","111","101","111","000","110","110","011","001","110","001","011","111","110","010","100","110","111","011","010","010","110","110","010","011","011","110","011","100","001","111","011","100","110","010","010","111","100","100","101","001","100","110","111","110","111","101","111","001","010","100","011","000","011","110","011","000","010","011","011","000","100","111","110","001","001","111","001","101","101","100","110","000","101","101","010","000","111","010","011","110","110","010","100","111","011","100","001","011","011","011","010","000","110","100","100","000","001","110","100","001","101","001","011","011","000","001","111","111","110","010","001","011","010","111","110","011","011","000","001","110","001","001","010","110","000","011","010","110","000","001","000","101","110","101","000","101","101","110","011","001","010","100","010","000","101","110","100","010","010","111","110","100","101","001","010","111","011","100","011","011","001","001","010","100","010","100","110","111","010","101","110","000","111","111","110","110","100","011","001","010","111","000","111","001","100","111","011","100","001","001","110","000","011","001","100","000","100","010","010","100","001","001","001","110","101","110","001","010","111","010","110","110","101","111","000","010","110","100","110","110"],"fidelity":0.9978}]};
+// First real run: IBM ibm_kingston, Nov 3 2026, job dbkveot6p51s73cnfao0
+const REAL_1 = {"format":"cascade-results/1","backend":"ibm_kingston","kind":"hardware","job_id":"dbkveot6p51s73cnfao0","created":"2026-11-03T15:02:04+00:00","runs":[{"preset":"dial","label":"Interference dial","n":1,"shots":2000,"patch":[{"name":"a","gate":"H","inputs":["q0"]},{"name":"dial","gate":"RZ","inputs":["a"],"theta":0.5},{"name":"out","gate":"H","inputs":["dial"]}],"counts":{"0":1016,"1":984},"ideal":{"0":0.5,"1":0.5},"record":["0","1","1","1","1","0","0","0","0","1","1","0","0","1","1","1","0","1","0","1","0","0","1","0","0","1","1","1","1","1","1","1","1","1","1","1","1","0","0","0","0","0","1","1","0","1","1","1","1","0","0","0","0","0","1","1","1","0","1","0","0","1","0","1","1","1","1","0","1","1","0","0","0","0","0","1","0","1","1","1","0","0","0","0","0","1","1","1","0","0","1","0","0","0","0","0","0","0","0","1","0","0","0","0","1","0","1","1","1","0","0","0","1","1","0","0","1","0","0","0","0","0","0","1","0","1","0","0","0","1","0","1","1","1","0","0","1","1","1","0","0","0","0","0","1","0","1","1","1","1","0","1","1","1","1","1","0","1","1","0","1","1","0","0","1","1","1","1","0","0","0","1","0","1","1","1","0","0","0","1","1","0","0","1","1","0","0","1","1","0","1","0","1","1","1","1","1","0","1","0","1","0","0","1","0","0","1","0","0","0","1","0","1","0","1","0","0","0","1","0","0","1","1","1","0","0","1","0","1","1","0","1","0","1","1","1","0","0","1","0","1","1","1","0","1","0","1","0","0","0","1","0","1","1","0","1","0","1","1","0","0","0","1","1","0","1","0","1","1","1","1","1","1","1","0","0","0","0","0","0","0","1","1","1","0","1","0","0","0","0","1","1","1","1","1","0","1","1","0","0","1","1","1","0","0","0","0","0","1","1","1","0","1","1","0","0","0","1","0","1","0","1","1","0","1","0","1","1","0","1","1","1","0","0","0","1","0","0","0","0","0","0","0","1","1","0","0","0","0","1","1","0","1","0","0","1","1","1","1","0","1","0","1","0","0","0","0","0","1","0","0","1","0","0","0","1","1","0","0","1","0","0","1","0","1","1","0","1","1","0","0","0","1","1","1","1","0","1","0","1","1","0","0","0","1","1","1","0","0","1","1","1","0","0","1","0","0","1","1","0","1","1","0","0","1","1","1","1","1","0","1","1","1","0","1","0","1","1","1","1","0","1","1","1","1","0","1","1","0","1","0","1","0","1","0","0","0","1","0","1","0","1","0","1","1","0","1","1","0","1","0","0","1","1","1","1","1","0","0","1","0","0","1","1","1","0","0","0","1","0","1","1","0","1","0","0","1","0","0","1","1","1","0","0","0","0","1","0","0","0","1","0"],"fidelity":0.9999},{"preset":"bell","label":"Bell pair (written backwards)","n":2,"shots":2000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"counts":{"00":984,"01":31,"10":60,"11":925},"ideal":{"00":0.5,"11":0.5},"record":["00","11","00","00","00","00","00","00","11","11","11","11","00","00","00","00","10","11","11","00","00","11","11","00","00","00","00","00","11","11","00","00","00","00","11","00","01","00","11","11","00","00","00","00","00","00","00","11","11","11","00","00","00","11","11","00","10","00","11","00","11","00","11","11","00","11","00","11","11","00","00","11","00","00","10","11","11","11","00","11","01","00","00","00","00","11","11","00","00","00","11","11","00","00","11","00","11","11","00","11","11","00","11","11","11","11","00","00","00","11","11","00","11","00","11","11","11","00","00","00","10","11","00","00","11","11","00","11","00","00","11","11","11","11","11","00","11","11","00","00","00","11","11","11","00","11","00","00","00","11","00","00","00","11","11","00","11","11","11","11","11","11","00","00","11","00","11","00","00","00","00","11","11","00","00","00","00","11","00","00","11","11","11","11","11","11","00","11","11","00","00","11","11","00","10","01","00","11","11","01","00","00","11","11","00","11","00","00","11","11","11","00","11","11","00","11","11","11","11","11","00","11","00","11","11","10","11","11","00","00","10","11","11","11","11","11","10","00","11","10","00","00","00","11","00","00","00","11","11","11","11","11","11","11","00","00","11","00","11","11","00","11","00","00","00","01","11","00","11","00","11","11","11","00","11","11","11","11","00","11","00","01","11","11","11","11","00","11","00","11","00","00","11","11","11","00","11","11","00","00","00","11","11","00","00","11","00","00","11","00","00","00","10","00","11","00","00","11","00","11","00","11","00","00","11","00","00","11","00","00","11","00","00","00","00","11","11","00","11","00","00","11","11","11","10","11","00","00","11","11","00","00","11","00","11","00","00","11","00","00","11","11","00","00","00","11","11","00","00","11","00","11","10","00","00","11","11","00","00","01","00","00","00","00","00","00","00","11","11","00","00","00","00","11","00","11","11","11","11","00","11","11","11","00","00","11","00","00","11","00","00","11","11","00","11","00","00","00","11","00","11","11","00","11","11","10","00","11","11","11","00","10","11","00","00","11","11","01","00","11","00","00","00","00","11","11","00","11","00","11","11","11","11","11","11","00","11","00","00","00","00","11","01","11","11","11","11","11","00","11","11","11","11","11","11","00","00","00","11","00","01","11","11","11","00","11","00","00","00","11","00","11","00","00","00","00","11","00","10","11","00","11","01","11","00","11","00","11","11","00","11","00"],"fidelity":0.9543},{"preset":"grover","label":"Grover search","n":2,"shots":2000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"counts":{"00":10,"01":26,"10":125,"11":1839},"ideal":{"11":1.0},"record":["11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","10","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","10","10","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","10","11","11","11","11","10","11","01","11","11","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","10","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","10","11","11","11","11","11","11","11","10","11","11","10","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","10","11","11","11","11","10","11","11","11","11","10","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","00","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","01","11","11","11","11","11","11","10","11","11","11","10","11","01","11","11","10","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","01","11","11","11","11","11","11","10","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","10","10","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","01","11","11","11","10","11","11","11","11","11","11","11","11","11","11"],"fidelity":0.9195},{"preset":"ghz","label":"GHZ chord","n":3,"shots":2000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"counts":{"000":947,"001":12,"010":34,"011":9,"100":3,"101":20,"110":11,"111":964},"ideal":{"000":0.5,"111":0.5},"record":["000","000","000","000","000","010","000","000","000","000","000","111","000","111","000","111","000","000","111","111","000","000","000","000","111","000","000","000","000","111","000","000","000","111","111","000","000","111","111","000","000","000","000","111","111","010","000","000","111","111","111","000","111","000","111","111","111","111","101","000","111","000","000","000","101","000","000","000","111","111","111","000","000","010","111","000","000","000","000","000","111","111","111","010","111","000","000","000","111","111","111","111","000","000","111","000","000","111","111","111","000","000","111","000","111","111","111","000","111","000","000","000","000","000","111","000","111","111","000","101","000","000","000","111","000","111","000","000","000","000","000","111","111","000","111","111","000","111","111","111","000","111","111","000","111","000","000","000","111","111","000","000","000","110","000","111","111","000","000","111","100","000","111","111","111","000","000","111","000","111","111","111","111","111","000","111","111","111","111","111","111","000","000","111","000","111","000","111","111","101","000","010","000","000","000","000","111","111","111","111","000","000","111","111","000","111","111","000","111","000","000","111","111","101","000","000","000","111","000","111","000","111","111","111","000","000","111","111","000","000","000","111","111","000","000","000","111","111","111","111","000","111","111","000","000","111","111","111","111","000","111","111","111","000","111","111","000","000","111","111","111","111","111","111","111","111","000","000","111","000","111","111","000","111","111","000","000","111","000","111","111","111","000","000","111","111","000","000","111","111","111","111","000","000","111","000","111","111","000","000","000","111","000","000","000","111","000","111","000","111","000","000","000","111","111","111","111","000","111","000","000","000","111","111","111","111","111","111","000","000","111","111","111","111","111","000","111","111","111","111","111","111","000","111","000","010","000","111","000","010","000","000","111","000","000","000","000","111","000","000","000","101","000","111","111","111","111","111","101","000","111","000","111","000","111","111","111","111","111","000","111","111","111","000","111","111","000","000","111","111","111","111","000","111","000","000","000","111","000","000","000","000","000","111","111","111","111","111","111","111","000","000","000","111","111","111","111","111","111","000","000","000","111","000","000","111","111","111","111","000","000","000","000","111","000","111","000","000","111","000","000","111","111","000","000","000","000","000","000","111","011","111","111","000","000","000","000","000","000","000","111","111","000","111","000","000","000","111","000","111","000","000","000","000","111","000","111","111","000","000","111","111","000","111","000","000","111","111","000","000","111","111","111","111","111","000","111","000","000","111","111","000","111","111","000","000","111","000","000","000","111","000"],"fidelity":0.9555},{"preset":"rainbow","label":"Phase rainbow","n":3,"shots":2000,"patch":[{"name":"h0","gate":"H","inputs":["q0"]},{"name":"h1","gate":"H","inputs":["q1"]},{"name":"h2","gate":"H","inputs":["q2"]},{"name":"p0","gate":"S","inputs":["h0"]},{"name":"p1","gate":"T","inputs":["h1"]},{"name":"p2","gate":"RZ","inputs":["h2"],"theta":0.25}],"counts":{"000":270,"001":254,"010":239,"011":254,"100":256,"101":243,"110":242,"111":242},"ideal":{"000":0.125,"001":0.125,"010":0.125,"011":0.125,"100":0.125,"101":0.125,"110":0.125,"111":0.125},"record":["010","001","001","111","100","110","001","011","011","101","011","010","101","101","000","000","000","100","110","010","000","110","000","101","100","101","001","011","111","111","100","111","000","101","011","101","110","011","010","110","011","000","110","000","011","001","010","100","001","011","100","111","010","010","110","000","000","010","111","001","000","001","110","111","111","011","000","011","011","000","110","000","011","011","100","000","101","000","010","010","101","010","110","100","010","101","100","111","000","101","100","111","111","110","011","001","100","100","111","011","111","001","001","000","000","100","101","001","111","000","010","101","000","000","110","100","001","111","110","101","001","010","000","110","111","000","001","110","100","011","111","000","101","011","101","000","100","100","111","001","101","011","011","111","010","111","011","100","110","000","001","110","011","000","100","101","111","001","111","001","000","011","011","111","010","101","011","011","110","101","001","100","011","010","000","011","011","000","010","011","000","111","010","001","101","110","111","000","000","100","000","101","001","010","011","100","001","111","100","110","100","010","010","001","000","111","101","110","011","110","101","110","001","001","110","110","100","010","000","000","010","001","101","000","110","011","111","101","010","110","000","000","010","111","010","100","101","000","001","111","000","010","011","111","101","011","010","011","001","001","111","001","001","011","101","000","001","101","011","110","010","001","110","000","101","111","011","111","111","100","000","100","010","101","001","011","101","001","111","100","000","010","011","010","101","100","011","100","000","000","101","110","110","000","111","101","100","101","000","011","001","001","000","000","010","010","010","111","001","110","111","010","000","100","011","010","010","001","001","100","110","111","010","000","000","101","110","110","011","100","011","110","110","000","111","000","110","010","100","101","000","010","100","110","011","001","001","100","000","111","110","010","011","110","001","111","101","010","110","101","001","100","010","110","111","110","010","101","100","101","111","111","011","001","111","101","111","101","011","101","100","001","101","001","100","011","010","100","111","100","000","000","100","000","100","101","011","000","100","110","110","110","100","101","101","101","100","001","110","111","001","011","111","011","111","100","100","011","010","111","001","100","100","110","000","010","101","111","110","100","110","011","001","101","110","001","100","000","000","101","001","110","001","000","010","110","011","100","000","010","101","011","000","011","001","100","001","101","000","111","001","010","000","000","111","100","100","100","011","000","100","001","110","100","001","001","001","011","111","010","011","101","010","111","111","010","101","100","001","000","001","101","111","110","001","111","101","000","010","101","110","000","101","000","110","111","101","110","100","001","001","110"],"fidelity":0.9996}]};
+// Compiler comparison: IBM ibm_fez, Nov 3 2026
+const REAL_2 = {"format":"cascade-results/1","backend":"ibm_fez","kind":"hardware","job_id":"dbkvhqonceqs73amnmkg,dbkvhqpkdqps73939k40","comparison":true,"created":"2026-11-03T15:08:54+00:00","runs":[{"preset":"bell","n":2,"shots":4000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"ideal":{"00":0.5,"11":0.5},"label":"Bell pair (written backwards) \u00b7 IBM default","variant":"default","counts":{"00":2008.0,"01":34.0,"10":24.0,"11":1934.0},"record":["00","00","11","00","11","00","00","00","11","11","11","00","11","11","00","11","00","11","00","00","11","11","11","00","00","11","00","11","00","00","00","11","00","11","00","00","11","11","00","11","00","11","11","11","00","11","11","00","11","00","00","11","11","11","00","00","00","11","11","11","11","00","11","11","00","00","11","00","11","11","00","11","11","00","11","11","11","11","00","00","00","11","00","11","00","11","00","00","11","11","00","11","11","11","11","00","11","00","00","11","00","11","11","11","11","00","00","11","11","00","00","11","11","11","11","11","11","11","00","11","00","00","11","11","00","11","00","11","00","11","11","11","00","11","00","11","00","11","11","00","00","11","00","00","00","00","11","11","00","00","11","00","11","11","11","00","00","11","00","00","00","11","00","11","11","00","00","11","11","00","11","00","11","00","00","11","11","00","00","11","00","01","00","00","00","11","00","11","00","10","00","11","00","11","00","00","00","00","11","00","01","00","11","11","11","11","11","00","00","11","00","11","11","00","00","00","00","00","10","11","00","11","00","00","00","11","11","00","11","00","11","11","11","11","11","11","11","00","00","00","00","11","00","00","00","11","00","11","11","00","00","11","00","11","00","00","00","11","11","00","00","00","11","11","00","00","11","10","11","00","00","11","11","11","11","11","11","00","11","11","00","00","00","00","00","00","00","00","11","00","00","11","00","00","11","00","11","00","00","11","11","11","11","11","11","00","11","11","11","11","00","00","11","11","00","00","00","00","11","00","11","00","00","00","00","10","11","11","11","00","00","11","00","11","00","11","11","00","00","00","11","00","00","00","00","11","11","11","00","00","00","00","00","00","11","01","11","11","00","00","00","11","11","00","11","11","11","11","00","11","00","00","00","11","00","11","11","00","00","11","11","00","00","11","11","11","11","11","00","00","00","00","00","11","00","00","11","11","11","11","00","00","00","10","00","00","00","11","11","00","00","11","11","11","11","11","00","00","00","00","11","00","00","11","11","00","00","00","11","11","11","00","11","00","00","00","00","00","00","00","00","11","00","11","11","00","00","00","00","11","00","11","00","00","00","00","00","11","11","00","11","11","00","00","11","11","11","00","00","00","11","00","11","11","11","00","00","00","11","00","00","11","11","11","00","11","00","11","00","00","00","00","00","11","00","00","00","11","11","11","00","00","00","00","11","11","11","00","11","00","11","00"],"fidelity":0.9854,"predicted":0.9901},{"preset":"bell","n":2,"shots":4000,"patch":[{"name":"entangle","gate":"CX","inputs":["spread","q1"]},{"name":"spread","gate":"H","inputs":["q0"]}],"ideal":{"00":0.5,"11":0.5},"label":"Bell pair (written backwards) \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"00":2048.652,"01":5.083,"11":1946.265},"raw_counts":{"00":2030,"01":35,"10":23,"11":1912},"record":null,"fidelity":0.9986,"fidelity_before_readout_fix":0.9853,"predicted":0.9901,"physical_qubits":[84,85],"readout_flip_rates":{"read_1_when_0":[0.0045,0.0047],"read_0_when_1":[0.0105,0.0073]},"baseline_fidelity":0.9854},{"preset":"grover","n":2,"shots":4000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"ideal":{"11":1.0},"label":"Grover search \u00b7 IBM default","variant":"default","counts":{"00":28.0,"01":53.0,"10":45.0,"11":3874.0},"record":["11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","10","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","00","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","01","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","11","10"],"fidelity":0.9685,"predicted":0.987},{"preset":"grover","n":2,"shots":4000,"patch":[{"name":"s0","gate":"H","inputs":["q0"]},{"name":"s1","gate":"H","inputs":["q1"]},{"name":"oracle","gate":"CZ","inputs":["s0","s1"]},{"name":"h0","gate":"H","inputs":["oracle.0"]},{"name":"h1","gate":"H","inputs":["oracle.1"]},{"name":"x0","gate":"X","inputs":["h0"]},{"name":"x1","gate":"X","inputs":["h1"]},{"name":"mirror","gate":"CZ","inputs":["x0","x1"]},{"name":"u0","gate":"X","inputs":["mirror.0"]},{"name":"u1","gate":"X","inputs":["mirror.1"]},{"name":"out0","gate":"H","inputs":["u0"]},{"name":"out1","gate":"H","inputs":["u1"]}],"ideal":{"11":1.0},"label":"Grover search \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"00":14.595,"01":2.616,"10":11.734,"11":3971.055},"raw_counts":{"00":15,"01":38,"10":51,"11":3896},"record":null,"fidelity":0.9928,"fidelity_before_readout_fix":0.974,"predicted":0.987,"physical_qubits":[85,84],"readout_flip_rates":{"read_1_when_0":[0.0032,0.0025],"read_0_when_1":[0.009,0.01]},"baseline_fidelity":0.9685},{"preset":"ghz","n":3,"shots":4000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"ideal":{"000":0.5,"111":0.5},"label":"GHZ chord \u00b7 IBM default","variant":"default","counts":{"000":2017.0,"001":19.0,"010":30.0,"011":18.0,"100":4.0,"101":40.0,"110":38.0,"111":1834.0},"record":["011","000","111","000","000","000","000","111","000","111","000","000","111","111","000","111","111","000","000","000","000","111","111","000","111","000","111","111","111","000","111","000","111","111","111","111","111","000","000","111","111","111","111","101","111","111","000","000","111","101","000","000","111","000","111","111","111","101","000","111","111","000","111","000","000","111","000","111","111","111","111","111","000","111","000","000","000","000","000","000","111","111","111","001","000","111","111","000","000","000","000","000","111","111","000","111","000","000","111","000","000","111","011","111","111","000","111","111","111","111","111","000","000","000","000","000","111","111","000","111","111","111","000","000","111","000","111","111","111","111","000","000","111","000","111","000","111","111","111","111","000","111","111","111","111","000","000","000","000","111","111","000","111","000","000","111","000","000","000","011","000","111","011","111","111","111","000","111","111","000","000","111","111","111","111","111","000","000","111","000","111","000","000","000","001","111","111","111","000","000","000","000","101","111","000","111","000","111","111","111","111","000","000","000","000","000","000","000","111","111","000","111","000","111","000","111","000","111","000","111","111","111","000","111","000","000","000","111","000","000","000","000","111","111","111","111","111","010","110","111","000","000","000","000","000","000","111","000","111","111","111","111","000","001","000","111","000","000","000","000","000","000","111","000","111","111","000","000","000","000","000","000","000","000","111","000","000","111","000","111","000","000","000","111","000","000","000","000","000","111","110","011","111","000","111","000","111","000","111","111","000","111","110","111","000","111","000","111","000","111","111","000","000","111","111","101","000","111","000","111","000","000","000","111","111","000","111","000","000","000","000","000","000","000","101","000","111","111","111","000","111","000","000","111","000","111","111","111","000","111","111","111","111","000","000","000","000","111","000","000","111","111","000","111","111","000","000","110","000","111","000","000","111","111","111","000","000","000","111","000","000","111","000","000","000","000","111","000","000","111","111","110","000","000","000","111","111","111","000","000","000","111","111","111","111","111","000","000","111","000","000","000","111","111","000","000","000","000","111","111","000","111","000","000","000","110","111","000","000","000","000","000","000","000","111","000","111","111","111","111","111","111","000","000","000","111","111","111","000","000","000","000","000","111","111","111","000","000","111","111","111","000","000","111","111","111","111","000","111","000","000","111","000","000","111","000","000","000","000","000","111","000","111","111","000","110","000","000","000","111","000","000","000","000","111","000","010","111","111","111","111","111","000","111","111","111","000","111","000","111","111","000"],"fidelity":0.9622,"predicted":0.9827},{"preset":"ghz","n":3,"shots":4000,"patch":[{"name":"s","gate":"H","inputs":["q0"]},{"name":"link1","gate":"CX","inputs":["s","q1"]},{"name":"link2","gate":"CX","inputs":["link1.0","q2"]}],"ideal":{"000":0.5,"111":0.5},"label":"GHZ chord \u00b7 Cascade compiler","variant":"cascade","mitigated":true,"counts":{"000":2029.725,"001":21.407,"010":32.946,"011":13.753,"100":0.126,"101":15.897,"110":14.98,"111":1871.166},"raw_counts":{"000":2019,"001":25,"010":38,"011":27,"100":3,"101":29,"110":30,"111":1829},"record":null,"fidelity":0.9748,"fidelity_before_readout_fix":0.9614,"predicted":0.9827,"physical_qubits":[147,137,146],"readout_flip_rates":{"read_1_when_0":[0.0013,0.0025,0.0018],"read_0_when_1":[0.0073,0.0073,0.0083]},"baseline_fidelity":0.9622}]};
+const datasets = [REAL_2, REAL_1, ...(SAMPLE ? [SAMPLE] : [])];
+let src='ideal', realMatch=null, recIdx=0, pinnedKey=null;
+const sigOf=(n,steps)=>n+'#'+steps.map(s=>s.gate+'('+s.qs.join(',')+')'+(GATE_INFO[s.gate].rot?(+s.theta).toFixed(3):'')).join(' ');
+function allRuns(){ const out=[]; datasets.forEach((d,di)=>d.runs.forEach((r,ri)=>out.push({d,r,key:`${di}:${ri}`}))); return out; }
+function patchState(r){ return {n:r.n,nodes:r.patch.map(p=>N_(p.name,p.gate,[...p.inputs],p.theta??0.5))}; }
+function runSig(r){
+  if(r._sig===undefined){ const c=compile(patchState(r)); r._sig=c.ok?sigOf(r.n,c.steps):null; }
+  return r._sig;
+}
+function findMatch(res){
+  if(!res.ok) return null;
+  const s=sigOf(state.n,res.steps);
+  const m=allRuns().filter(x=>runSig(x.r)===s);
+  const pin=m.find(x=>x.key===pinnedKey); if(pin) m.unshift(pin);
+  else m.sort((a,b)=>((a.d.kind==='hardware'?0:1)-(b.d.kind==='hardware'?0:1)) || ((a.r.variant==='cascade'?0:1)-(b.r.variant==='cascade'?0:1)) || String(b.d.created).localeCompare(String(a.d.created)));
+  if(!m.length) return null;
+  const x=m[0], N=1<<x.r.n, probs=Array(N).fill(0);
+  for(const [bits,c] of Object.entries(x.r.counts)) probs[parseInt(bits,2)]=c/x.r.shots;
+  return {...x,probs};
+}
+const fmtDate=s=>{ try{ return new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return ''; } };
+function renderRuns(){
+  const sel=$('#runs'); sel.innerHTML='';
+  sel.append(el('option',{value:'',text:realMatch?'':'This patch hasn\'t been run on a machine yet',selected:!realMatch,hidden:!!realMatch}));
+  for(const x of allRuns()){
+    const tag=x.d.kind==='hardware'?x.d.backend:'noise model';
+    sel.append(el('option',{value:x.key,selected:realMatch&&realMatch.key===x.key,text:`${x.r.label} · ${tag} · ${fmtDate(x.d.created)}`}));
+  }
+  const note=$('#real-note');
+  if(realMatch){
+    const {d,r}=realMatch;
+    note.textContent=(d.kind==='hardware'
+      ? `Measured on IBM's ${d.backend}, ${r.shots.toLocaleString()} shots, ${fmtDate(d.created)}. `
+      : `Sample from a noise model of IBM's ${d.backend.replace(/ \(noise model\)$/,'').replace(/^fake_/,'ibm_')}, not a real run. `)
+      + (r.variant==='cascade'
+          ? `Cascade's compiler: best-scoring qubits ${r.physical_qubits.join(', ')}, readout correction and decoupling. Match with ideal: ${(r.fidelity*100).toFixed(1)}%, against ${(r.baseline_fidelity*100).toFixed(1)}% for IBM's default compile in the same session (${((r.fidelity-r.baseline_fidelity)*100>=0?'+':'')}${((r.fidelity-r.baseline_fidelity)*100).toFixed(1)} points). Corrected results are probabilities, so Measure mode draws from them instead of replaying shots.`
+          : `Match with ideal: ${(r.fidelity*100).toFixed(1)}%. Real mode plays the measured counts; Measure mode replays the shots in the order they came out.`)
+      + ` Measuring can't see phase, so every real note sits in the center, uncolored.`;
+  } else {
+    note.textContent='Pick a run above to load its patch, or load a results file from run_ibm.py. Real results show up whenever the patch matches a circuit that was run.';
+  }
+  const btn=$('#src-real'); btn.disabled=!realMatch;
+  if(!realMatch&&src==='real') setSrc('ideal');
+  $('#real-key').hidden=!realMatch;
+}
+function setSrc(s){
+  src=s; recIdx=0; shots=[];
+  $('#src-ideal').setAttribute('aria-pressed',String(s==='ideal'));
+  $('#src-real').setAttribute('aria-pressed',String(s==='real'));
+  renderSpectrum(); applyAudio();
+}
+$('#src-ideal').addEventListener('click',()=>setSrc('ideal'));
+$('#src-real').addEventListener('click',()=>{ if(realMatch) setSrc('real'); });
+$('#runs').addEventListener('change',e=>{
+  const x=allRuns().find(y=>y.key===e.target.value); if(!x) return;
+  pinnedKey=x.key;
+  state=patchState(x.r); $('#qubits').value=String(x.r.n);
+  if(PRESETS[x.r.preset]) $('#preset').value=x.r.preset;
+  shots=[]; update(true);
+});
+$('#load-label').addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); $('#load').click(); } });
+$('#load').addEventListener('change',e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    let d=null; try{ d=JSON.parse(rd.result); }catch(err){}
+    if(!d||d.format!=='cascade-results/1'||!Array.isArray(d.runs)){
+      $('#real-note').textContent=`${f.name} isn't a results file from run_ibm.py. Look in the results folder for a file ending in .json.`; return;
+    }
+    datasets.push(d); update(true);
+    if(realMatch&&realMatch.d===d) setSrc('real');
+  };
+  rd.readAsText(f); e.target.value='';
+});
+
+/* ---------------- the cascade ---------------- */
+function update(editor){
+  const res=compile(state); current=res;
+  if(res.ok){ const {probs,phases}=simulate(state.n,res.steps); lastGood={n:state.n,probs,phases,steps:res.steps}; }
+  const prevKey=realMatch&&realMatch.key;
+  realMatch=findMatch(res);
+  if((realMatch&&realMatch.key)!==prevKey) recIdx=0;
+  renderRuns();
+  showStatus(res);
+  if(editor) renderEditor();
+  markRows(res);
+  $('#scope').classList.toggle('stale',!res.ok);
+  renderDiagram(res.ok?res.steps:(lastGood&&lastGood.n===state.n?lastGood.steps:[]));
+  renderSpectrum(); applyAudio();
+  $('#code').textContent=exportText(res);
+}
+
+/* ---------------- boot ---------------- */
+for(const [k,p] of Object.entries(PRESETS)) $('#preset').append(el('option',{value:k,text:p.label}));
+$('#preset').addEventListener('change',e=>loadPreset(e.target.value));
+$('#qubits').addEventListener('change',e=>{ state.n=+e.target.value; shots=[]; update(true); });
+loadPreset('dial');
+</script>
