@@ -1,5 +1,5 @@
 """
-Cascade's noise-fighting compiler.
+Riffle's noise-fighting compiler.
 
 Three techniques, each one switchable, all measured against the default:
 

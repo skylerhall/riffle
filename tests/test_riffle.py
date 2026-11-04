@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from cascade import CX, CZ, H, RZ, X, Cascade, CascadeError, NoCloningError, Z  # noqa: E402
+from riffle import CX, CZ, H, RZ, X, Circuit, RiffleError, NoCloningError, Z  # noqa: E402
 import mitigate as M  # noqa: E402
 
 
@@ -16,7 +16,7 @@ def approx(d, ref):
 
 
 def test_out_of_order_bell_pair():
-    c = Cascade(2)
+    c = Circuit(2)
     c["entangle"] = CX("spread", "q1")
     assert c.result is None and "spread" in c.status   # waits for the missing node
     c["spread"] = H("q0")
@@ -24,7 +24,7 @@ def test_out_of_order_bell_pair():
 
 
 def test_interference_and_rewiring():
-    c = Cascade(1)
+    c = Circuit(1)
     c["a"] = H("q0")
     c["b"] = H("a")
     assert approx(c.result.probabilities, {"0": 1})
@@ -35,14 +35,14 @@ def test_interference_and_rewiring():
 
 
 def test_rotation_dial():
-    c = Cascade(1)
+    c = Circuit(1)
     with c.batch():
         c["a"] = H("q0"); c["dial"] = RZ(math.pi / 2, "a"); c["out"] = H("dial")
     assert approx(c.result.probabilities, {"0": 0.5, "1": 0.5})
 
 
 def test_grover_finds_11():
-    g = Cascade(2)
+    g = Circuit(2)
     with g.batch():
         g["s0"], g["s1"] = H("q0"), H("q1")
         g["oracle"] = CZ("s0", "s1")
@@ -55,7 +55,7 @@ def test_grover_finds_11():
 
 
 def test_no_cloning_is_rejected_and_rolled_back():
-    c = Cascade(2)
+    c = Circuit(2)
     c["a"] = H("q0")
     c["copy1"] = X("a")
     with pytest.raises(NoCloningError):
@@ -64,7 +64,7 @@ def test_no_cloning_is_rejected_and_rolled_back():
 
 
 def test_cycle_is_reported():
-    c = Cascade(1)
+    c = Circuit(1)
     with c.batch():
         c["a"] = H("b")
         c["b"] = H("a")
@@ -72,8 +72,8 @@ def test_cycle_is_reported():
 
 
 def test_bad_qubit_reference():
-    c = Cascade(1)
-    with pytest.raises(CascadeError):
+    c = Circuit(1)
+    with pytest.raises(RiffleError):
         c["a"] = H("q3")
         c.compile()
 
@@ -98,11 +98,11 @@ def test_readout_correction_recovers_truth():
 
 
 # ---------------------------------------------------------------- work qubits + automatic cleanup
-from cascade import CCX  # noqa: E402
+from riffle import CCX  # noqa: E402
 
 
 def _grover_via_work(cleanup=True):
-    g = Cascade(2, work=1, cleanup=cleanup)
+    g = Circuit(2, work=1, cleanup=cleanup)
     with g.batch():
         g["s0"], g["s1"] = H("q0"), H("q1")
         g["both"] = CCX("s0", "s1", "w0")       # w0 = q0 AND q1
@@ -133,7 +133,7 @@ def test_without_cleanup_the_garbage_spoils_it():
 
 
 def test_several_writes_are_undone_in_reverse():
-    c = Cascade(2, work=1)
+    c = Circuit(2, work=1)
     with c.batch():
         c["a"], c["b"] = H("q0"), H("q1")
         c["flip"] = X("w0")                 # w0 = 1
@@ -146,11 +146,11 @@ def test_several_writes_are_undone_in_reverse():
 
 
 def test_work_qubit_rules():
-    c = Cascade(1, work=1)
+    c = Circuit(1, work=1)
     c["bad"] = H("w0")                       # H can't be undone by a classical uncompute
     assert c.result is None and "can't be undone automatically" in c.status
 
-    c = Cascade(2, work=1)
+    c = Circuit(2, work=1)
     with c.batch():
         c["a"] = CX("q0", "w0")
         c["read"] = CZ("a.1", "q1")
@@ -159,7 +159,7 @@ def test_work_qubit_rules():
 
 
 def test_control_changed_before_last_read_is_rejected():
-    c = Cascade(2, work=1)
+    c = Circuit(2, work=1)
     with c.batch():
         c["s0"], c["s1"] = H("q0"), H("q1")
         c["both"] = CCX("s0", "s1", "w0")
@@ -169,9 +169,9 @@ def test_control_changed_before_last_read_is_rejected():
 
 
 def test_work_qubits_are_reserved_and_bounded():
-    c = Cascade(1, work=1)
-    with pytest.raises(CascadeError):
+    c = Circuit(1, work=1)
+    with pytest.raises(RiffleError):
         c["w0"] = H("q0")
-    with pytest.raises(CascadeError):
+    with pytest.raises(RiffleError):
         c["a"] = X("w3")
         c.compile()

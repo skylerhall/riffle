@@ -1,0 +1,6 @@
+// A Bell pair, written backwards: Riffle doesn't care about line order.
+// entangle refers to spread before spread exists; the graph sorts it out.
+circuit bell(q0, q1) {
+    entangle_a, entangle_b = CX spread, q1     // spread controls q1
+    spread                 = H q0              // put q0 in superposition
+}

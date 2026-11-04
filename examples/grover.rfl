@@ -1,0 +1,17 @@
+// Grover search over 2 qubits: finds the marked answer |11> in one step.
+circuit grover(q0, q1) {
+    s0 = H q0                  // start with every answer equally likely
+    s1 = H q1
+
+    o0, o1 = CZ s0, s1         // oracle: flip the sign of |11>
+
+    h0 = H o0                  // diffusion: reflect about the average,
+    h1 = H o1                  // which amplifies the marked answer
+    x0 = X h0
+    x1 = X h1
+    m0, m1 = CZ x0, x1
+    u0 = X m0
+    u1 = X m1
+    out0 = H u0
+    out1 = H u1
+}

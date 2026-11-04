@@ -1,0 +1,6 @@
+// Interference dial: turn the angle and probability swings between |0> and |1>.
+circuit dial(q) {
+    a    = H q
+    turn = RZ(pi/2) a          // try 0, pi/4, pi ... and run it again
+    out  = H turn
+}

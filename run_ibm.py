@@ -1,6 +1,6 @@
 """
-Run Cascade circuits on a real IBM quantum computer and save the results
-for Cascade Listen's "Real" mode.
+Run Riffle circuits on a real IBM quantum computer and save the results
+for Riffle Listen's "Real" mode.
 
 Setup (once):
     pip install numpy qiskit qiskit-ibm-runtime
@@ -11,9 +11,9 @@ Run:
     python run_ibm.py --fake     # same thing on a noise model of ibm_kingston (no account needed;
                                  # also needs: pip install qiskit-aer)
     python run_ibm.py --only grover bell --shots 4000 --backend ibm_kingston
-    python run_ibm.py --patch my_patch.json   # your own patch (Export > Patch file in Cascade Listen)
+    python run_ibm.py --patch my_patch.json   # your own patch (Export > Patch file in Riffle Listen)
 
-It writes results/<timestamp>-<backend>.json. Load that file in Cascade Listen
+It writes results/<timestamp>-<backend>.json. Load that file in Riffle Listen
 ("Load results") to hear the real machine next to the ideal circuit.
 
 Cost: each circuit takes a few seconds of machine time. IBM's free Open Plan
@@ -29,13 +29,13 @@ import os
 import pathlib
 import sys
 
-from cascade import Cascade, CCX, CX, CZ, H, RX, RY, RZ, S, SWAP, T, X, Y, Z
+from riffle import Circuit, CCX, CX, CZ, H, RX, RY, RZ, S, SWAP, T, X, Y, Z
 
 HERE = pathlib.Path(__file__).resolve().parent
 
 
 # ------------------------------------------------------------- presets
-# Same five patches as Cascade Listen, so the page can match them up.
+# Same five patches as Riffle Listen, so the page can match them up.
 def _dial(c):
     c["a"] = H("q0"); c["dial"] = RZ(0.5 * math.pi, "a"); c["out"] = H("dial")
 
@@ -75,7 +75,7 @@ PRESETS = {  # name: (label, qubits, builder)
     "grover": ("Grover search", 2, _grover),
     "ghz": ("GHZ chord", 3, _ghz),
     "rainbow": ("Phase rainbow", 3, _rainbow),
-    # Grover through a work qubit, with Cascade's automatic cleanup and without it
+    # Grover through a work qubit, with Riffle's automatic cleanup and without it
     "grover_work": ("Grover via work qubit", 2, _grover_work, {"work": 1}),
     "grover_work_raw": ("Grover via work qubit, no cleanup", 2, _grover_work, {"work": 1, "cleanup": False}),
 }
@@ -87,10 +87,10 @@ GATE_FNS = {"H": H, "X": X, "Y": Y, "Z": Z, "S": S, "T": T, "RX": RX, "RY": RY, 
 
 
 def add_patch_file(path):
-    """Register a 'Patch file' exported from Cascade Listen as an extra preset."""
+    """Register a 'Patch file' exported from Riffle Listen as an extra preset."""
     d = json.loads(pathlib.Path(path).read_text())
     if d.get("format") != "cascade-patch/1":
-        sys.exit(f"{path} isn't a patch file. In Cascade Listen use Export > Patch file.")
+        sys.exit(f"{path} isn't a patch file. In Riffle Listen use Export > Patch file.")
 
     def fn(c, nodes=d["patch"]):
         for p in nodes:
@@ -105,7 +105,7 @@ def add_patch_file(path):
 
 def build(key):
     label, n, fn, *extra = PRESETS[key]
-    c = Cascade(n, **(extra[0] if extra else {}))
+    c = Circuit(n, **(extra[0] if extra else {}))
     with c.batch():
         fn(c)
     return label, c
@@ -113,7 +113,7 @@ def build(key):
 
 # ------------------------------------------------------------- helpers
 def patch_of(c):
-    """The circuit in Cascade Listen's patch format (θ in units of π)."""
+    """The circuit in Riffle Listen's patch format (θ in units of π)."""
     out = []
     for name, g in c.nodes.items():
         node = {"name": name, "gate": g.name, "inputs": list(g.inputs)}
@@ -169,7 +169,7 @@ def run(keys, shots=2000, fake=False, backend_name=None, record=512):
 
     runs = []
     for (k, label, c, _), pub in zip(jobs, result):
-        # Qiskit writes bitstrings with qubit 0 on the right; Cascade puts q0 on the left.
+        # Qiskit writes bitstrings with qubit 0 on the right; Riffle puts q0 on the left.
         bits = [b[::-1] for b in pub.data.meas.get_bitstrings()]
         counts = {}
         for b in bits:
@@ -203,7 +203,7 @@ def run(keys, shots=2000, fake=False, backend_name=None, record=512):
 
 # ------------------------------------------------------------- compare
 def _bits(pub):
-    # Qiskit writes bitstrings with qubit 0 on the right; Cascade puts q0 on the left.
+    # Qiskit writes bitstrings with qubit 0 on the right; Riffle puts q0 on the left.
     return [b[::-1] for b in pub.data.meas.get_bitstrings()]
 
 
@@ -215,7 +215,7 @@ def _probs(bits):
 
 
 def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
-    """Run each circuit twice, side by side: IBM's default compile vs. Cascade's
+    """Run each circuit twice, side by side: IBM's default compile vs. Riffle's
     noise-fighting compiler (placement + readout correction + decoupling)."""
     import mitigate as M
     from qiskit_ibm_runtime import SamplerV2
@@ -243,7 +243,7 @@ def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
         smart_pubs += [it["best"], *it["cal"]]
     smart_job = smart.run(smart_pubs, shots=shots)
     ids = [j.job_id() if callable(getattr(j, "job_id", None)) else None for j in (base_job, smart_job)]
-    print(f"Submitted jobs {ids[0] or '(local)'} (default) and {ids[1] or '(local)'} (cascade). Waiting...")
+    print(f"Submitted jobs {ids[0] or '(local)'} (default) and {ids[1] or '(local)'} (riffle). Waiting...")
     base_res, smart_res = base_job.result(), smart_job.result()
 
     runs = []
@@ -268,7 +268,7 @@ def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
                      "counts": {b: round(p * shots, 3) for b, p in b_probs.items()},
                      "record": b_bits[:record], "fidelity": round(b_fid, 4),
                      "predicted": round(it["d_score"], 4)})
-        runs.append({**common, "label": f"{label} · Cascade compiler", "variant": "cascade", "mitigated": True,
+        runs.append({**common, "label": f"{label} · Riffle compiler", "variant": "cascade", "mitigated": True,
                      "counts": {b: round(p * shots, 3) for b, p in s_probs.items()},
                      "raw_counts": {b: round(p * shots) for b, p in s_raw.items()},
                      "record": None, "fidelity": round(s_fid, 4), "fidelity_before_readout_fix": round(place_fid, 4),
@@ -276,7 +276,7 @@ def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
                      "readout_flip_rates": {"read_1_when_0": [round(x, 4) for x in e0],
                                             "read_0_when_1": [round(x, 4) for x in e1]},
                      "baseline_fidelity": round(b_fid, 4)})
-        print(f"  {label:<30} IBM default {b_fid:6.1%}   Cascade {place_fid:6.1%} placed"
+        print(f"  {label:<30} IBM default {b_fid:6.1%}   Riffle {place_fid:6.1%} placed"
               f"  -> {s_fid:6.1%} with readout fix   ({(s_fid - b_fid) * 100:+.1f} pts)")
 
     out = {"format": "cascade-results/1", "backend": bname, "kind": kind, "job_id": ",".join(i or "" for i in ids),
@@ -292,12 +292,12 @@ def run_compare(keys, shots=4000, fake=False, backend_name=None, record=512):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--compare", action="store_true",
-                    help="run IBM's default compile and Cascade's noise-fighting compiler side by side")
+                    help="run IBM's default compile and Riffle's noise-fighting compiler side by side")
     ap.add_argument("--only", nargs="+", choices=list(PRESETS), help="run only these presets")
     ap.add_argument("--shots", type=int, default=2000)
     ap.add_argument("--backend", help="a specific machine, e.g. ibm_kingston (default: least busy)")
     ap.add_argument("--fake", action="store_true", help="use a noise model instead of real hardware")
-    ap.add_argument("--patch", nargs="+", metavar="FILE", help="run patch files exported from Cascade Listen")
+    ap.add_argument("--patch", nargs="+", metavar="FILE", help="run patch files exported from Riffle Listen")
     a = ap.parse_args()
     if a.compare:
         keys = [add_patch_file(f) for f in a.patch] if a.patch else (a.only or ["bell", "grover", "ghz"])

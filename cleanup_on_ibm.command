@@ -1,7 +1,7 @@
 #!/bin/bash
 # Double-click on a Mac to run Grover through a work qubit on IBM hardware, with and without automatic cleanup.
 cd "$(dirname "$0")" || exit 1
-echo "== Cascade: running on IBM Quantum =="
+echo "== Riffle: running on IBM Quantum =="
 if [ ! -x .venv/bin/python ]; then
   echo "First run: setting up Python (takes a minute or two)..."
   python3 -m venv .venv || { echo "SETUP FAILED: python3 not available"; exit 1; }

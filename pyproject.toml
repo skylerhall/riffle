@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riffle-lang"
+version = "0.1.0"
+description = "Riffle: a reactive quantum circuit language. Write gates in any order, the compiler enforces the physics, and it runs on IBM and Quantinuum stacks."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Skyler Hall" }]
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+ibm = ["qiskit>=2.0", "qiskit-ibm-runtime>=0.40"]
+quantinuum = ["guppylang", "selene-sim"]
+
+[project.scripts]
+riffle = "riffle_lang:main"
+
+[tool.setuptools]
+py-modules = ["riffle", "riffle_lang", "mitigate", "quantinuum", "run_ibm"]

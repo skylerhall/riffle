@@ -1,0 +1,9 @@
+// Phase rainbow: all 8 outcomes equally likely, each with its own phase.
+circuit rainbow(q0, q1, q2) {
+    h0 = H q0
+    h1 = H q1
+    h2 = H q2
+    p0 = S h0
+    p1 = T h1
+    p2 = RZ(pi/4) h2
+}

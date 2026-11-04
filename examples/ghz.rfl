@@ -1,0 +1,6 @@
+// GHZ state: three qubits that are all 0 or all 1, together.
+circuit ghz(q0, q1, q2) {
+    s          = H q0
+    c1, t1     = CX s, q1
+    c2, t2     = CX c1, q2
+}

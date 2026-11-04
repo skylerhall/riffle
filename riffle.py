@@ -1,12 +1,12 @@
 """
-cascade — a reactive, order-independent way to write quantum circuits.
+Riffle — a reactive, order-independent way to write quantum circuits.
 
 Instead of writing a circuit top-to-bottom, you declare named nodes and
-say what each node takes as input. Cascade builds the dependency graph,
+say what each node takes as input. Riffle builds the dependency graph,
 sorts it, simulates it, and re-runs everything downstream whenever any
 node changes (like a spreadsheet).
 
-    c = Cascade(2)
+    c = Circuit(2)
     c.watch(print)
     c["bell"] = CX("spread", "q1")   # refers to a node that doesn't exist yet
     c["spread"] = H("q0")            # graph completes -> cascade runs
@@ -17,16 +17,16 @@ Inputs:
     "name.0", "name.1" outputs of a multi-qubit node (output i continues input i)
 
 Because quantum states can't be copied, each wire can feed exactly one
-node. Cascade enforces that rule (the no-cloning theorem) at compile time.
+node. Riffle enforces that rule (the no-cloning theorem) at compile time.
 
 Work qubits and automatic cleanup:
 
-    c = Cascade(2, work=1)              # w0 is a scratch qubit that starts at |0>
+    c = Circuit(2, work=1)              # w0 is a scratch qubit that starts at |0>
     c["both"] = CCX("a", "b", "w0")     # compute: w0 = a AND b
     c["mark"] = Z("both.2")             # use it
     # ...the compiler adds the undo of `both` right after w0's last use,
     # wired in before anything changes a or b again, so w0 returns to |0>
-    # and doesn't spoil the interference. Cascade(..., cleanup=False) shows
+    # and doesn't spoil the interference. Circuit(..., cleanup=False) shows
     # what happens without it.
 
 A work qubit may only be written by X, CX or CCX (all classical and
@@ -44,11 +44,11 @@ import numpy as np
 
 
 # ---------------------------------------------------------------- errors
-class CascadeError(Exception):
+class RiffleError(Exception):
     pass
 
 
-class NoCloningError(CascadeError):
+class NoCloningError(RiffleError):
     pass
 
 
@@ -73,7 +73,7 @@ class Gate:
         self.params = tuple(params)
         arity = int(round(math.log2(self.matrix.shape[0])))
         if arity != len(self.inputs):
-            raise CascadeError(f"{name} takes {arity} input(s), got {len(self.inputs)}")
+            raise RiffleError(f"{name} takes {arity} input(s), got {len(self.inputs)}")
 
     @property
     def arity(self):
@@ -167,7 +167,7 @@ def _is_source(ref):
     return bool(_QUBIT.fullmatch(ref) or _WORK.fullmatch(ref))
 
 
-class Cascade:
+class Circuit:
     def __init__(self, n_qubits, shots=0, seed=None, work=0, cleanup=True):
         self.n = n_qubits
         self.work = work
@@ -183,9 +183,9 @@ class Cascade:
     # -- editing --------------------------------------------------------
     def __setitem__(self, name, gate):
         if not _NAME.fullmatch(name) or _is_source(name):
-            raise CascadeError(f"bad node name {name!r} (q0, q1... and w0, w1... are reserved)")
+            raise RiffleError(f"bad node name {name!r} (q0, q1... and w0, w1... are reserved)")
         if not isinstance(gate, Gate):
-            raise CascadeError("node value must be a gate, e.g. H('q0')")
+            raise RiffleError("node value must be a gate, e.g. H('q0')")
         before = dict(self.nodes)
         self.nodes[name] = gate
         self._commit(before)
@@ -237,19 +237,19 @@ class Cascade:
         m = _QUBIT.fullmatch(ref)
         if m:
             if int(m.group(1)) >= self.n:
-                raise CascadeError(f"{ref!r}: only {self.n} qubits exist")
+                raise RiffleError(f"{ref!r}: only {self.n} qubits exist")
             return (ref, 0)
         m = _WORK.fullmatch(ref)
         if m:
             if int(m.group(1)) >= self.work:
-                raise CascadeError(f"{ref!r}: only {self.work} work qubits exist")
+                raise RiffleError(f"{ref!r}: only {self.work} work qubits exist")
             return (ref, 0)
         name, _, idx = ref.partition(".")
         return (name, int(idx) if idx else 0)
 
     def compile(self):
         """Return ordered steps [(node_name, gate, qubit_indices)].
-        Raises CascadeError if the graph is incomplete or invalid.
+        Raises RiffleError if the graph is incomplete or invalid.
         With work qubits and cleanup on, the steps include the automatic
         undo gates (their names end in ~undo)."""
         steps = self._compile_nodes(self.nodes)
@@ -258,10 +258,10 @@ class Cascade:
         expanded = self._with_cleanup()
         try:
             return self._compile_nodes(expanded)
-        except CascadeError as e:
+        except RiffleError as e:
             if "cycle" not in str(e):
                 raise
-            raise CascadeError(
+            raise RiffleError(
                 "a work qubit can't be cleaned up automatically: one of the qubits used to compute it "
                 "is changed before the work qubit's last use. Read the work qubit first, or change "
                 "that qubit later."
@@ -278,7 +278,7 @@ class Cascade:
                         missing.add(src)
                         continue
                     if i >= nodes[src].arity:
-                        raise CascadeError(f"{name}: {src!r} has no output .{i}")
+                        raise RiffleError(f"{name}: {src!r} has no output .{i}")
                     deps[name].add(src)
                 wire = (src, i)
                 if wire in consumers:
@@ -289,7 +289,7 @@ class Cascade:
                     )
                 consumers[wire] = name
         if missing:
-            raise CascadeError("waiting on: " + ", ".join(sorted(missing)))
+            raise RiffleError("waiting on: " + ", ".join(sorted(missing)))
 
         # topological sort (Kahn), stable by declaration order
         order, ready = [], [n for n in nodes if not deps[n]]
@@ -304,7 +304,7 @@ class Cascade:
                         ready.append(m)
         if len(order) != len(nodes):
             stuck = [n for n in nodes if n not in order]
-            raise CascadeError("cycle between: " + ", ".join(stuck))
+            raise RiffleError("cycle between: " + ", ".join(stuck))
 
         # follow each wire back to its physical qubit (work qubits come after the main ones)
         qubit_of = {(f"q{q}", 0): q for q in range(self.n)}
@@ -314,7 +314,7 @@ class Cascade:
             gate = nodes[name]
             qs = [qubit_of[self._parse(r)] for r in gate.inputs]
             if len(set(qs)) != len(qs):
-                raise CascadeError(f"{name}: uses the same qubit twice")
+                raise RiffleError(f"{name}: uses the same qubit twice")
             for i, q in enumerate(qs):
                 qubit_of[(name, i)] = q
             steps.append((name, gate, qs))
@@ -353,14 +353,14 @@ class Cascade:
                 g = nodes[name].name
                 if j in _WRITES.get(g, ()):
                     if last_read:
-                        raise CascadeError(
+                        raise RiffleError(
                             f"w{k} is written by {name!r} after {last_read!r} has read it. "
                             "Automatic cleanup needs every write to a work qubit before its first read.")
                     writes.append((name, j))
                 elif j in _READS.get(g, ()):
                     last_read = name
                 else:
-                    raise CascadeError(
+                    raise RiffleError(
                         f"{name!r} ({g}) changes work qubit w{k} in a way that can't be undone automatically. "
                         "Work qubits can only be written by X, CX or CCX, then read as a control or by a phase gate.")
             if not writes:
@@ -411,7 +411,7 @@ class Cascade:
             self.status = "ok"
         except NoCloningError:
             raise
-        except CascadeError as e:
+        except RiffleError as e:
             self.result, self.status = None, str(e)
         for fn in self._watchers:
             fn(self)
@@ -420,7 +420,9 @@ class Cascade:
     def diagram(self):
         steps = self.compile()
         total = self.n + self.work
-        rows = [f"q{q}: " for q in range(self.n)] + [f"w{k}: " for k in range(self.work)]
+        labels = getattr(self, "line_names", None) or ([f"q{q}" for q in range(self.n)] + [f"w{k}" for k in range(self.work)])
+        width = max(len(x) for x in labels)
+        rows = [f"{x.rjust(width)}: " for x in labels]
         sym = {"CX": ["●", "⊕"], "CZ": ["●", "●"], "CCX": ["●", "●", "⊕"], "SWAP": ["×", "×"]}
         auto_sym = {"CX": ["○", "⊕"], "CCX": ["○", "○", "⊕"], "X": ["x"]}
         any_auto = False
@@ -440,12 +442,12 @@ class Cascade:
                 rows[q] += cell
         out = "\n".join(r + "─" for r in rows)
         if any_auto:
-            out += "\n    (○ / x = added by Cascade to return work qubits to |0>)"
+            out += "\n    (○ / x = added by Riffle to return work qubits to |0>)"
         return out
 
     def __str__(self):
         if self.result is None:
-            return f"[cascade] {self.status}"
+            return f"[riffle] {self.status}"
         return self.diagram() + "\n" + str(self.result)
 
     def to_qiskit(self, measure=False):
