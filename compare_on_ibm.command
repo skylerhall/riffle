@@ -6,9 +6,9 @@ if [ ! -x .venv/bin/python ]; then
   echo "First run: setting up Python (takes a minute or two)..."
   python3 -m venv .venv || { echo "SETUP FAILED: python3 not available"; exit 1; }
 fi
-source .venv/bin/activate
-pip install -q --disable-pip-version-check -r requirements.txt || { echo "SETUP FAILED: install"; exit 1; }
+PY=.venv/bin/python   # used directly, so the folder can be moved or renamed
+$PY -m pip install -q --disable-pip-version-check -r requirements.txt || { echo "SETUP FAILED: install"; exit 1; }
 mkdir -p results
-python -W ignore run_ibm.py --compare "$@" 2>&1 | tee results/last_compare.log
+$PY -W ignore run_ibm.py --compare "$@" 2>&1 | tee results/last_compare.log
 echo
 echo "== Finished. You can close this window. =="
